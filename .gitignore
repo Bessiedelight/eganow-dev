@@ -21,6 +21,7 @@
 # misc
 .DS_Store
 *.pem
+*.pem-base64.txt
 
 # debug
 npm-debug.log*
