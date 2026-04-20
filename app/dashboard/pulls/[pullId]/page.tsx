@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
 import { useOrganization } from "@/hooks/use-organization"
-import { fetchPullRequestDetail, fetchCommitDetail } from "@/lib/github/actions"
+import { fetchPullRequestDetail, fetchCommitDetail, fetchBranchDetail, createGitHubPullRequest } from "@/lib/github/actions"
 import { toast } from "sonner"
 import { AppSidebar } from "@/components/app-sidebar"
 import {
@@ -24,17 +24,20 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { PullReviewChat } from "@/components/pull-review-chat"
+import { AutoGrowTextarea } from "@/components/auto-grow-textarea"
+import { gsap } from "gsap"
 
 import { parseDiff, Diff, Hunk } from "react-diff-view"
 import "react-diff-view/style/index.css"
 
 import {
-  GitPullRequest, GitMerge, ChevronRight, CheckCircle2, CircleDashed, Users, Plus,
+  GitPullRequest, GitMerge, ChevronRight, CheckCircle2, CircleDashed, Users,
   MessageSquare, FileCode2, Activity, MoreHorizontal,
   MessageCircle, Star, Link2, Copy, GitFork, ChevronDown,
-  Paperclip, ArrowUpCircle, User, Tag, GitBranch, Bot,
+  Paperclip, User, Tag, GitBranch, Bot,
   XCircle, RefreshCw, FolderKanban, Check, Clock, CalendarDays, GitCommit, ShieldCheck,
-  Sparkles, AlertTriangle, Info, Loader2, Shield, Zap, RotateCcw, ThumbsUp, ThumbsDown, HelpCircle
+  Loader2
 } from "lucide-react"
 
 function getInitials(name: string) {
@@ -53,7 +56,7 @@ function formatDate(ts: number) {
   return new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
 }
 
-// ─── Editable Property Row ────────────────────────────────────
+// â”€â”€â”€ Editable Property Row â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function EditablePropertyRow({ label, icon: Icon, children }: {
   label: string; icon: any; children: React.ReactNode
 }) {
@@ -68,7 +71,7 @@ function EditablePropertyRow({ label, icon: Icon, children }: {
   )
 }
 
-// ─── Read-Only Property Row (GitHub-controlled) ───────────────
+// â”€â”€â”€ Read-Only Property Row (GitHub-controlled) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 function ReadOnlyPropertyRow({ label, value, icon, iconColor = "text-muted-foreground" }: {
   label: string; value: React.ReactNode; icon: any; iconColor?: string
 }) {
@@ -80,6 +83,473 @@ function ReadOnlyPropertyRow({ label, value, icon, iconColor = "text-muted-foreg
         <span>{label}</span>
       </div>
       <div className="flex-1 min-w-0 flex items-center">{value}</div>
+    </div>
+  )
+}
+
+type ParsedInlineReviewItem = {
+  title: string
+  issue?: string
+  reference?: string
+  code?: string
+  suggestion?: string
+}
+
+type ParsedActivityReview = {
+  title?: string
+  summary?: string
+  health: string[]
+  healthy: string[]
+  inlineComments: ParsedInlineReviewItem[]
+  nextSteps: string[]
+}
+
+function parseStructuredReviewBody(body: string): ParsedActivityReview | null {
+  const lines = body.replace(/\r\n/g, "\n").split("\n")
+  const parsed: ParsedActivityReview = {
+    health: [],
+    healthy: [],
+    inlineComments: [],
+    nextSteps: [],
+  }
+
+  let section: "summary" | "health" | "healthy" | "inline" | "next" | null = null
+  let currentItem: ParsedInlineReviewItem | null = null
+  let readingCode = false
+  const summaryParts: string[] = []
+
+  const flushInlineItem = () => {
+    if (!currentItem) return
+    parsed.inlineComments.push({
+      ...currentItem,
+      code: currentItem.code?.trim() || undefined,
+    })
+    currentItem = null
+    readingCode = false
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd()
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      if (readingCode) {
+        readingCode = false
+      } else if (section === "inline") {
+        flushInlineItem()
+      }
+      continue
+    }
+
+    if (trimmed === "Pull Request Review" || trimmed === "Pull Request Review Summary") {
+      parsed.title = trimmed
+      continue
+    }
+    if (trimmed === "Summary") {
+      flushInlineItem()
+      section = "summary"
+      continue
+    }
+    if (trimmed === "Health") {
+      flushInlineItem()
+      section = "health"
+      continue
+    }
+    if (trimmed === "What looks healthy:") {
+      flushInlineItem()
+      section = "healthy"
+      continue
+    }
+    if (trimmed === "Inline comments:") {
+      flushInlineItem()
+      section = "inline"
+      continue
+    }
+    if (trimmed === "Suggested next steps:") {
+      flushInlineItem()
+      section = "next"
+      continue
+    }
+    if (trimmed === "---") {
+      flushInlineItem()
+      continue
+    }
+
+    if (section === "summary") {
+      summaryParts.push(trimmed)
+      continue
+    }
+
+    if (section === "health" && trimmed.startsWith("- ")) {
+      parsed.health.push(trimmed.slice(2))
+      continue
+    }
+
+    if (section === "healthy" && trimmed.startsWith("- ")) {
+      parsed.healthy.push(trimmed.slice(2))
+      continue
+    }
+
+    if (section === "next" && trimmed.startsWith("- ")) {
+      parsed.nextSteps.push(trimmed.slice(2))
+      continue
+    }
+
+    if (section === "inline") {
+      if (!currentItem) {
+        currentItem = { title: trimmed }
+        continue
+      }
+
+      if (readingCode) {
+        if (trimmed.startsWith("Suggestion: ")) {
+          currentItem.suggestion = trimmed.slice("Suggestion: ".length)
+          readingCode = false
+        } else {
+          currentItem.code = currentItem.code ? `${currentItem.code}\n${line}` : line
+        }
+        continue
+      }
+
+      if (trimmed.startsWith("Issue: ")) {
+        currentItem.issue = trimmed.slice("Issue: ".length)
+        continue
+      }
+      if (trimmed.startsWith("Reference: ")) {
+        currentItem.reference = trimmed.slice("Reference: ".length)
+        continue
+      }
+      if (trimmed === "Code:") {
+        currentItem.code = ""
+        readingCode = true
+        continue
+      }
+      if (trimmed.startsWith("Suggestion: ")) {
+        currentItem.suggestion = trimmed.slice("Suggestion: ".length)
+        continue
+      }
+
+      flushInlineItem()
+      currentItem = { title: trimmed }
+    }
+  }
+
+  flushInlineItem()
+  parsed.summary = summaryParts.join(" ").trim()
+
+  if (!parsed.summary && parsed.inlineComments.length === 0 && parsed.nextSteps.length === 0) {
+    return null
+  }
+
+  return parsed
+}
+
+function getReviewIndicatorTone(value: string) {
+  const normalized = value.toLowerCase()
+
+  if (
+    normalized.includes("request-changes") ||
+    normalized.includes("critical") ||
+    normalized.includes("high") ||
+    normalized.includes("risk")
+  ) {
+    return {
+      dot: "bg-red-500/80",
+      pill: "border-red-500/20 bg-red-500/10 text-red-500",
+      bullet: "bg-red-500/75",
+    }
+  }
+
+  if (
+    normalized.includes("comment") ||
+    normalized.includes("medium") ||
+    normalized.includes("warning") ||
+    normalized.includes("watch")
+  ) {
+    return {
+      dot: "bg-amber-500/80",
+      pill: "border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-300",
+      bullet: "bg-amber-500/75",
+    }
+  }
+
+  if (
+    normalized.includes("healthy") ||
+    normalized.includes("good") ||
+    normalized.includes("pass") ||
+    normalized.includes("low")
+  ) {
+    return {
+      dot: "bg-emerald-500/80",
+      pill: "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300",
+      bullet: "bg-emerald-500/75",
+    }
+  }
+
+  return {
+    dot: "bg-muted-foreground/60",
+    pill: "border-border/60 bg-muted/20 text-muted-foreground",
+    bullet: "bg-muted-foreground/55",
+  }
+}
+
+function ReviewSnippet({ code }: { code: string }) {
+  const lines = React.useMemo(() => code.trimEnd().split("\n"), [code])
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-xl border border-border/40 bg-background">
+      <div className="border-b border-border/40 bg-muted/10 px-3 py-2 text-[11px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
+        Code Reference
+      </div>
+      <div className="overflow-x-auto text-[12px] [&::-webkit-scrollbar]:hidden">
+        {lines.map((line, index) => {
+          const isHunk = line.startsWith("@@")
+          const isInsert = line.startsWith("+") && !line.startsWith("+++")
+          const isDelete = line.startsWith("-") && !line.startsWith("---")
+          const tone = isHunk
+            ? {
+                row: "bg-muted/20 text-muted-foreground",
+                gutter: "bg-muted/30 text-muted-foreground/80",
+              }
+            : isInsert
+              ? {
+                  row: "bg-emerald-500/10 text-foreground",
+                  gutter: "bg-emerald-500/20 text-emerald-600 dark:text-emerald-300",
+                }
+              : isDelete
+                ? {
+                    row: "bg-red-500/10 text-foreground",
+                    gutter: "bg-red-500/20 text-red-600 dark:text-red-300",
+                  }
+                : {
+                    row: "bg-background text-foreground/90",
+                    gutter: "bg-muted/10 text-muted-foreground/70",
+                  }
+
+          const marker = isHunk ? "@@" : isInsert ? "+" : isDelete ? "-" : " "
+          const content =
+            isHunk ? line : isInsert || isDelete ? line.slice(1) : line
+
+          return (
+            <div
+              key={`${index}-${line}`}
+              className={`grid min-w-full grid-cols-[46px_minmax(0,1fr)] font-mono leading-6 ${tone.row}`}
+            >
+              <div className={`border-r border-border/30 px-3 py-1 text-right ${tone.gutter}`}>
+                {marker}
+              </div>
+              <div className="whitespace-pre px-3 py-1">{content || " "}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function ReviewActivityBody({ body }: { body: string }) {
+  const [expanded, setExpanded] = React.useState(false)
+  const parsed = React.useMemo(() => parseStructuredReviewBody(body), [body])
+  const detailsRef = React.useRef<HTMLDivElement>(null)
+  const hasAnimatedRef = React.useRef(false)
+
+  const previewText = parsed?.summary || body
+  const compactText =
+    previewText.length > 260 ? `${previewText.slice(0, 260).trimEnd()}...` : previewText
+  const shouldCollapse = body.length > 320 || !!parsed
+  const displayText = parsed && expanded ? previewText : compactText
+
+  React.useLayoutEffect(() => {
+    const el = detailsRef.current
+    if (!el) return
+
+    gsap.killTweensOf(el)
+
+    if (!hasAnimatedRef.current) {
+      gsap.set(el, {
+        display: expanded ? "block" : "none",
+        height: expanded ? "auto" : 0,
+        opacity: expanded ? 1 : 0,
+      })
+      hasAnimatedRef.current = true
+      return
+    }
+
+    if (expanded) {
+      gsap.set(el, { display: "block", height: 0, opacity: 0, overflow: "hidden" })
+      gsap.to(el, {
+        height: "auto",
+        opacity: 1,
+        duration: 0.3,
+        ease: "power2.out",
+        clearProps: "height,overflow",
+      })
+      return
+    }
+
+    gsap.set(el, { height: el.offsetHeight, overflow: "hidden" })
+    gsap.to(el, {
+      height: 0,
+      opacity: 0,
+      duration: 0.24,
+      ease: "power2.inOut",
+      onComplete: () => {
+        gsap.set(el, { display: "none" })
+      },
+    })
+
+    return () => {
+      gsap.killTweensOf(el)
+    }
+  }, [expanded])
+
+  return (
+    <div className="p-4 py-3">
+      <div className="max-w-none">
+        <p className="text-[13px] leading-7 text-foreground/90 whitespace-pre-wrap">{displayText}</p>
+
+        {parsed && (
+          <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+            {parsed.health.slice(0, 2).map((item) => {
+              const tone = getReviewIndicatorTone(item)
+              return (
+                <span
+                  key={item}
+                  className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 ${tone.pill}`}
+                >
+                  <span className={`size-1.5 rounded-full ${tone.dot}`} />
+                  {item}
+                </span>
+              )
+            })}
+            {parsed.inlineComments.length > 0 && (
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-border/50 bg-muted/20 px-2.5 py-1 text-muted-foreground">
+                <span className="size-1.5 rounded-full bg-muted-foreground/60" />
+                {parsed.inlineComments.length} inline note{parsed.inlineComments.length === 1 ? "" : "s"}
+              </span>
+            )}
+          </div>
+        )}
+
+        <div ref={detailsRef}>
+          {parsed ? (
+            <div className="mt-5 space-y-5 border-t border-border/40 pt-5">
+              {parsed.health.length > 0 && (
+                <section>
+                  <h4 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    Health
+                  </h4>
+                  <ul className="mt-3 space-y-2.5 text-[13px] leading-7 text-foreground/90">
+                    {parsed.health.map((item) => {
+                      const tone = getReviewIndicatorTone(item)
+                      return (
+                        <li key={item} className="flex gap-2.5">
+                          <span className={`mt-2 size-1.5 shrink-0 rounded-full ${tone.bullet}`} />
+                          <span>{item}</span>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </section>
+              )}
+
+              {parsed.healthy.length > 0 && (
+                <section className="border-t border-border/30 pt-5">
+                  <h4 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    What Looks Healthy
+                  </h4>
+                  <ul className="mt-3 space-y-2.5 text-[13px] leading-7 text-foreground/90">
+                    {parsed.healthy.map((item) => (
+                      <li key={item} className="flex gap-2.5">
+                        <span className="mt-2 size-1.5 shrink-0 rounded-full bg-emerald-500/75" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+
+              {parsed.inlineComments.length > 0 && (
+                <section className="border-t border-border/30 pt-5">
+                  <h4 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    Inline Comments
+                  </h4>
+                  <div className="mt-4 space-y-4">
+                    {parsed.inlineComments.map((item, index) => (
+                      <article
+                        key={`${item.title}-${index}`}
+                        className="rounded-xl border border-border/40 bg-muted/[0.03] p-4"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <h5 className="text-[13px] font-semibold text-foreground">
+                            {index + 1}. {item.title}
+                          </h5>
+                          {item.reference && (
+                            <div className="rounded-full border border-border/40 bg-background/70 px-2.5 py-1 text-[11px] text-muted-foreground">
+                              {item.reference}
+                            </div>
+                          )}
+                        </div>
+
+                        {item.issue && (
+                          <div className="mt-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                              Issue
+                            </div>
+                            <p className="mt-1.5 text-[13px] leading-7 text-foreground/90">{item.issue}</p>
+                          </div>
+                        )}
+
+                        {item.code && <ReviewSnippet code={item.code} />}
+
+                        {item.suggestion && (
+                          <div className="mt-3">
+                            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                              Suggestion
+                            </div>
+                            <p className="mt-1.5 text-[13px] leading-7 text-foreground/90">{item.suggestion}</p>
+                          </div>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {parsed.nextSteps.length > 0 && (
+                <section className="border-t border-border/30 pt-5">
+                  <h4 className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                    Suggested Next Steps
+                  </h4>
+                  <ul className="mt-3 space-y-2.5 text-[13px] leading-7 text-foreground/90">
+                    {parsed.nextSteps.map((item) => (
+                      <li key={item} className="flex gap-2.5">
+                        <span className="mt-2 size-1.5 shrink-0 rounded-full bg-amber-500/75" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+            </div>
+          ) : (
+            <div className="mt-5 border-t border-border/40 pt-5">
+              <div className="text-[13px] leading-7 text-foreground/90 whitespace-pre-wrap">{body}</div>
+            </div>
+          )}
+        </div>
+
+        {shouldCollapse && (
+          <button
+            type="button"
+            onClick={() => setExpanded((current) => !current)}
+            className="mt-4 inline-flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <ChevronDown className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`} />
+            {expanded ? "Show less" : "Read full review"}
+          </button>
+        )}
+      </div>
     </div>
   )
 }
@@ -103,12 +573,16 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
 
   // Detect if this is a commit route: "commit:{owner}/{repo}:{sha}"
   const isCommitView = pullIdRaw.startsWith("commit:")
+  const isBranchView = pullIdRaw.startsWith("branch:")
   const commitParts = isCommitView ? pullIdRaw.substring(7).split(":") : []
   const commitRepoFullName = isCommitView ? commitParts[0] : ""
   const commitSha = isCommitView ? commitParts[1] : ""
+  const branchParts = isBranchView ? pullIdRaw.substring(7).split(":") : []
+  const branchRepoFullName = isBranchView ? branchParts[0] : ""
+  const branchName = isBranchView ? branchParts.slice(1).join(":") : ""
 
   // PR route parsing
-  const hashIdx = !isCommitView ? pullIdRaw.lastIndexOf("#") : -1
+  const hashIdx = !isCommitView && !isBranchView ? pullIdRaw.lastIndexOf("#") : -1
   const repoFullName = hashIdx > 0 ? pullIdRaw.substring(0, hashIdx) : ""
   const prNumber = hashIdx > 0 ? parseInt(pullIdRaw.substring(hashIdx + 1), 10) : 0
 
@@ -121,49 +595,66 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
   const [editingBody, setEditingBody] = React.useState(false)
   const [bodyDraft, setBodyDraft] = React.useState("")
 
-  // AI Review (Convex-connected) — hooks placed after `pr` query below
-  const [chatInput, setChatInput] = React.useState("")
-  const [isTriggering, setIsTriggering] = React.useState(false)
-
+  // AI Review (Convex-connected) â€” hooks placed after `pr` query below
   // Comment
   const [commentText, setCommentText] = React.useState("")
-  const [isCommenting, setIsCommenting] = React.useState(false)
+  const [isCommenting] = React.useState(false)
 
   // GitHub data
   const [ghDiff, setGhDiff] = React.useState<string>("")
   const [ghDetail, setGhDetail] = React.useState<any>(null)
+  const [branchDetail, setBranchDetail] = React.useState<any>(null)
   const [ghLoading, setGhLoading] = React.useState(true)
+  const [isCreatingPr, setIsCreatingPr] = React.useState(false)
 
   // Convex queries
   const pr = useQuery(
     api.pullRequests.getByRepoAndNumber,
-    !isCommitView && organization && repoFullName && prNumber
+    !isCommitView && !isBranchView && organization && repoFullName && prNumber
       ? { orgId: organization._id, repoFullName, prNumber }
+      : "skip"
+  )
+  const branchRecord = useQuery(
+    api.branches.getByRepoAndBranch,
+    isBranchView && organization && branchRepoFullName && branchName
+      ? { orgId: organization._id, repoFullName: branchRepoFullName, branchName }
       : "skip"
   )
   const teams = useQuery(api.teams.listByOrg, organization ? { orgId: organization._id } : "skip")
   const projects = useQuery(api.projects.listByOrg, organization ? { orgId: organization._id } : "skip")
+  const reviewHub = useQuery(
+    api.prReviews.getHubByPullRequest,
+    !isCommitView && !isBranchView && pr?._id ? { pullRequestId: pr._id } : "skip"
+  )
+  const latestReviewRunRecord = useQuery(
+    api.reviewOrchestration.getLatestRunByPullRequest,
+    !isCommitView && !isBranchView && pr?._id ? { pullRequestId: pr._id } : "skip"
+  )
+  const reviewMessages = useQuery(
+    api.reviewOrchestration.getMessagesByRun,
+    latestReviewRunRecord?._id ? { runId: latestReviewRunRecord._id } : "skip"
+  )
+  const reviewFindings = useQuery(
+    api.reviewOrchestration.getFindingsByRun,
+    latestReviewRunRecord?._id ? { runId: latestReviewRunRecord._id } : "skip"
+  )
 
   // AI Review queries (must be after `pr` query)
-  const aiReview = useQuery(
-    api.aiReviews.getByPullRequest,
-    pr?._id ? { pullRequestId: pr._id } : "skip"
-  )
-  const aiChatMessages = useQuery(
-    api.aiReviews.getChatMessages,
-    aiReview?._id ? { reviewId: aiReview._id } : "skip"
-  )
-  const triggerReview = useMutation(api.aiReviews.triggerReview)
-  const sendChatMessage = useMutation(api.aiReviews.sendChatMessage)
-
   // Commit-specific state
   const [commitDetail, setCommitDetail] = React.useState<any>(null)
   const syncCommit = useMutation(api.commits.syncFromGitHub)
 
   const updatePR = useMutation(api.pullRequests.update)
   const syncPR = useMutation(api.pullRequests.syncFromGitHub)
+    const triggerOrchestratedReview = useMutation(api.reviewOrchestration.triggerReview)
+  const sendReviewMessage = useMutation(api.reviewOrchestration.sendMessage)
+  const [reviewSourceFilter, setReviewSourceFilter] = React.useState<"all" | "copilot" | "github" | "outdated">("all")
+  const [selectedThreadId, setSelectedThreadId] = React.useState<string | null>(null)
+  const [chatInput, setChatInput] = React.useState("")
+  const [isTriggering, setIsTriggering] = React.useState(false)
+  const [isRefreshingReviews, setIsRefreshingReviews] = React.useState(false)
 
-  // ─── Update helper ────────────────────────────────────
+  // â”€â”€â”€ Update helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleUpdate = async (field: string, value: any, toastMsg?: string) => {
     if (!pr) return
     try {
@@ -188,7 +679,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
     setEditingBody(false)
   }
 
-  // ─── Fetch GitHub PR details & ALWAYS sync to Convex ────
+  // â”€â”€â”€ Fetch GitHub PR details & ALWAYS sync to Convex â”€â”€â”€â”€
   React.useEffect(() => {
     if (isCommitView || !organization || !repoFullName || !prNumber) return
     setGhLoading(true)
@@ -208,6 +699,8 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
           isDraft: detail.isDraft,
           baseBranch: detail.baseBranch,
           headBranch: detail.headBranch,
+          baseSha: detail.baseSha,
+          headSha: detail.headSha,
           authorGithubUsername: detail.authorGithubUsername,
           additions: detail.additions,
           deletions: detail.deletions,
@@ -226,7 +719,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
       .finally(() => setGhLoading(false))
   }, [organization, repoFullName, prNumber, isCommitView])
 
-  // ─── Fetch Commit details ────
+  // â”€â”€â”€ Fetch Commit details â”€â”€â”€â”€
   React.useEffect(() => {
     if (!isCommitView || !organization || !commitRepoFullName || !commitSha) return
     setGhLoading(true)
@@ -251,43 +744,80 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
       .finally(() => setGhLoading(false))
   }, [organization, commitRepoFullName, commitSha, isCommitView])
 
-  // ─── AI Review Handlers ────────────────────────────────
-  const handleTriggerReview = async () => {
-    if (!pr?._id || !organization || !repoFullName || !prNumber) return
-    setIsTriggering(true)
-    try {
-      await triggerReview({
-        orgId: organization._id,
-        pullRequestId: pr._id,
-        repoFullName,
-        prNumber,
-        installationId: organization.githubInstallationId,
+  React.useEffect(() => {
+    if (!isBranchView || !organization || !branchRepoFullName || !branchName) return
+    setGhLoading(true)
+    fetchBranchDetail(
+      organization.githubInstallationId,
+      branchRepoFullName,
+      branchName,
+      branchRecord?.baseBranch
+    )
+      .then((detail) => {
+        setBranchDetail(detail)
+        if (detail.diff) setGhDiff(detail.diff)
+        setTitleDraft((current) => current || detail.title || branchName)
+        setBodyDraft((current) => current || detail.body || "")
       })
-      toast.success("AI review started")
-    } catch (err: any) {
-      toast.error(err.message || "Failed to start review")
-    } finally {
-      setIsTriggering(false)
-    }
-  }
+      .catch(console.error)
+      .finally(() => setGhLoading(false))
+  }, [organization, branchRepoFullName, branchName, isBranchView, branchRecord?.baseBranch])
 
-  const handleSendChat = async () => {
-    if (!chatInput.trim() || !pr?._id || !organization || !aiReview?._id) return
-    const text = chatInput
-    setChatInput("")
+  // â”€â”€â”€ AI Review Handlers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const handleCreatePullRequest = async () => {
+    if (!organization || !branchDetail || !titleDraft.trim()) return
+    setIsCreatingPr(true)
     try {
-      await sendChatMessage({
+      const created = await createGitHubPullRequest(
+        organization.githubInstallationId,
+        branchDetail.githubRepoFullName,
+        titleDraft.trim(),
+        bodyDraft.trim() || undefined,
+        branchDetail.headBranch,
+        branchDetail.baseBranch
+      )
+      const detail = await fetchPullRequestDetail(
+        organization.githubInstallationId,
+        created.githubRepoFullName,
+        created.githubPrNumber
+      )
+      await syncPR({
         orgId: organization._id,
-        pullRequestId: pr._id,
-        reviewId: aiReview._id,
-        message: text,
+        githubPrNumber: detail.githubPrNumber,
+        githubRepoFullName: detail.githubRepoFullName,
+        githubPrId: detail.githubPrId,
+        githubUrl: detail.githubUrl,
+        title: detail.title,
+        body: detail.body,
+        state: detail.state,
+        isDraft: detail.isDraft,
+        baseBranch: detail.baseBranch,
+        headBranch: detail.headBranch,
+        baseSha: detail.baseSha,
+        headSha: detail.headSha,
+        authorGithubUsername: detail.authorGithubUsername,
+        additions: detail.additions,
+        deletions: detail.deletions,
+        changedFiles: detail.changedFiles,
+        mergedBy: detail.mergedBy,
+        mergedAt: detail.mergedAt,
+        reviewers: detail.reviewers?.map((r: any) => ({
+          githubUsername: r.githubUsername,
+          state: r.state || "pending",
+          submittedAt: r.submittedAt,
+        })),
+        githubLabels: detail.githubLabels,
       })
+      toast.success("Pull request created")
+      router.push(`/dashboard/pulls/${encodeURIComponent(`${created.githubRepoFullName}#${created.githubPrNumber}`)}`)
     } catch {
-      toast.error("Failed to send message")
+      toast.error("Failed to create pull request")
+    } finally {
+      setIsCreatingPr(false)
     }
   }
 
-  // ─── GSAP animation ──────────────────────────────────
+  // â”€â”€â”€ GSAP animation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   React.useEffect(() => {
     import("gsap").then(({ gsap }) => {
       if (!sliderRef.current) return
@@ -299,7 +829,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
     })
   }, [view])
 
-  // ─── Merge data: ghDetail (fresh from GitHub) overrides Convex for GitHub-native fields ───
+  // â”€â”€â”€ Merge data: ghDetail (fresh from GitHub) overrides Convex for GitHub-native fields â”€â”€â”€
   // pr = Convex data (has app-native fields: team, project, comments, activity)
   // ghDetail = fresh from GitHub API (has accurate additions, deletions, reviewers, state)
   const prData = React.useMemo(() => {
@@ -330,9 +860,355 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
   let files: any[] = []
   try { files = parseDiff(diffSource) } catch { files = parseDiff(fallbackDiff) }
 
-  // ─── Loading states ───────────────────────────────────
+
+
+  // â”€â”€â”€ Loading states â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+  const aiReview: any = React.useMemo(() => {
+    if (!latestReviewRunRecord) return null
+
+    const findings = reviewFindings || []
+    const criticalFindings = findings.filter((finding: any) => finding.severity === "critical")
+    const warningFindings = findings.filter((finding: any) => finding.severity === "warning")
+    const infoFindings = findings.filter((finding: any) => finding.severity === "info")
+    const verdict =
+      criticalFindings.length > 0
+        ? "request-changes"
+        : warningFindings.length > 1
+          ? "discuss"
+          : "approve"
+
+    return {
+      ...latestReviewRunRecord,
+      step: latestReviewRunRecord.status,
+      contextStats: latestReviewRunRecord.metrics
+        ? {
+            filesAnalyzed: latestReviewRunRecord.metrics.filesAnalyzed || 0,
+            totalDiffLines: latestReviewRunRecord.metrics.diffLines || 0,
+            linkedIssuesCount: latestReviewRunRecord.metrics.linkedIssuesCount || 0,
+            relatedFilesExpanded: latestReviewRunRecord.metrics.relatedFilesExpanded || 0,
+          }
+        : undefined,
+      model: latestReviewRunRecord.metrics?.model,
+      processingTimeMs: latestReviewRunRecord.metrics?.durationMs,
+      review:
+        latestReviewRunRecord.status === "completed"
+          ? {
+              summary: latestReviewRunRecord.summary || "AI review completed.",
+              intent: "Automated pull request review across repository context, changed files, and reviewer signals.",
+              codeQuality: {
+                score: Math.max(1, 10 - criticalFindings.length * 4 - warningFindings.length * 2 - Math.min(infoFindings.length, 2)),
+                highlights: findings.slice(0, 3).map((finding: any) => finding.title),
+                concerns: findings.slice(0, 4).map((finding: any) => finding.body),
+              },
+              potentialIssues: findings.map((finding: any) => ({
+                severity: finding.severity,
+                file: finding.path || "pull-request",
+                description: finding.body,
+                suggestion: finding.suggestion,
+              })),
+              security: {
+                hasRisks: findings.some((finding: any) => finding.agentName === "security"),
+                findings: findings
+                  .filter((finding: any) => finding.agentName === "security")
+                  .map((finding: any) => finding.title),
+              },
+              tradeoffs: findings
+                .filter((finding: any) => finding.agentName === "architecture")
+                .map((finding: any) => finding.title),
+              verdict,
+              confidence:
+                findings.length === 0
+                  ? 0.92
+                  : Math.max(0.45, Math.min(0.95, 0.92 - warningFindings.length * 0.08 - criticalFindings.length * 0.14)),
+            }
+          : null,
+    }
+  }, [latestReviewRunRecord, reviewFindings])
+
+  const aiChatMessages: any[] | null = reviewMessages || []
+  const filteredReviewThreads = React.useMemo(() => {
+    const threads = reviewHub?.threads || []
+    return threads.filter((thread: any) => {
+      if (reviewSourceFilter === "all") return true
+      if (reviewSourceFilter === "outdated") return thread.status === "outdated" || thread.freshness === "stale"
+      return thread.source === reviewSourceFilter
+    })
+  }, [reviewHub?.threads, reviewSourceFilter])
+
+  const selectedReviewThread =
+    filteredReviewThreads.find((thread: any) => String(thread._id) === selectedThreadId) ||
+    filteredReviewThreads[0] ||
+    null
+  const selectedThreadComments: any[] = selectedReviewThread?.comments || []
+  const latestReviewRun: any = reviewHub?.latestFreshRun || reviewHub?.latestRun || aiReview || null
+  const reviewStatusLabel = latestReviewRun
+    ? latestReviewRun.status === "completed"
+      ? "Completed"
+      : latestReviewRun.status === "failed"
+        ? "Failed"
+        : latestReviewRun.status === "pending"
+          ? "Pending"
+          : "Running"
+    : "Waiting for review"
+  const reviewSourceLabel = latestReviewRun
+    ? latestReviewRun.source === "copilot"
+      ? "GitHub Copilot"
+      : latestReviewRun.source === "app_ai"
+        ? "Eganow AI"
+        : "GitHub review"
+    : "No review yet"
+  const reviewFreshnessLabel = reviewHub?.freshness
+    ? reviewHub.freshness.isFresh
+      ? "Current head reviewed"
+      : "Review needs refresh"
+    : "Waiting for review head"
+  const staleReviewReason = reviewHub?.freshness && !reviewHub.freshness.isFresh
+    ? `Reviewed ${reviewHub.freshness.latestReviewedHeadSha?.slice(0, 7) || "unknown"} while current head is ${reviewHub.freshness.currentHeadSha?.slice(0, 7) || "unknown"}`
+    : null
+
+  React.useEffect(() => {
+    if (!selectedThreadId && filteredReviewThreads.length > 0) {
+      setSelectedThreadId(String(filteredReviewThreads[0]._id))
+      return
+    }
+
+    if (
+      selectedThreadId &&
+      filteredReviewThreads.length > 0 &&
+      !filteredReviewThreads.some((thread: any) => String(thread._id) === selectedThreadId)
+    ) {
+      setSelectedThreadId(String(filteredReviewThreads[0]._id))
+    }
+  }, [filteredReviewThreads, selectedThreadId])
+
+  const handleTriggerReview = async () => {
+    if (!organization || !pr?._id || !repoFullName || !prNumber) return
+    setIsTriggering(true)
+    try {
+      await triggerOrchestratedReview({
+        orgId: organization._id,
+        pullRequestId: pr._id,
+        repoFullName,
+        prNumber,
+        installationId: organization.githubInstallationId,
+      })
+      toast.success("AI review queued")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to queue AI review")
+    } finally {
+      setIsTriggering(false)
+    }
+  }
+
+  const handleSendChat = async () => {
+    if (!organization || !pr?._id || !aiReview?._id || !chatInput.trim()) return
+    const message = chatInput.trim()
+    setChatInput("")
+    try {
+      await sendReviewMessage({
+        orgId: organization._id,
+        pullRequestId: pr._id,
+        runId: aiReview._id,
+        message,
+      })
+    } catch (error) {
+      setChatInput(message)
+      toast.error(error instanceof Error ? error.message : "Failed to send follow-up")
+    }
+  }
+
+  const handleRefreshReviews = async (forceAppSummary?: boolean) => {
+    if (!organization || !repoFullName || !prNumber) return
+    setIsRefreshingReviews(true)
+    try {
+      const detail = await fetchPullRequestDetail(
+        organization.githubInstallationId,
+        repoFullName,
+        prNumber
+      )
+      setGhDetail(detail)
+      if (detail.diff) setGhDiff(detail.diff)
+      await syncPR({
+        orgId: organization._id,
+        githubPrNumber: detail.githubPrNumber,
+        githubRepoFullName: detail.githubRepoFullName,
+        githubPrId: detail.githubPrId,
+        githubUrl: detail.githubUrl,
+        title: detail.title,
+        body: detail.body,
+        state: detail.state,
+        isDraft: detail.isDraft,
+        baseBranch: detail.baseBranch,
+        headBranch: detail.headBranch,
+        baseSha: detail.baseSha,
+        headSha: detail.headSha,
+        authorGithubUsername: detail.authorGithubUsername,
+        additions: detail.additions,
+        deletions: detail.deletions,
+        changedFiles: detail.changedFiles,
+        mergedBy: detail.mergedBy,
+        mergedAt: detail.mergedAt,
+        reviewers: detail.reviewers?.map((r: any) => ({
+          githubUsername: r.githubUsername,
+          state: r.state || "pending",
+          submittedAt: r.submittedAt,
+        })),
+        githubLabels: detail.githubLabels,
+      })
+
+      if (forceAppSummary && pr?._id) {
+        await triggerOrchestratedReview({
+          orgId: organization._id,
+          pullRequestId: pr._id,
+          repoFullName,
+          prNumber,
+          installationId: organization.githubInstallationId,
+        })
+      }
+
+      toast.success(forceAppSummary ? "Review data refreshed and AI review queued" : "Review data refreshed")
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to refresh review data")
+    } finally {
+      setIsRefreshingReviews(false)
+    }
+  }
+
+  if (isBranchView) {
+    if (ghLoading && !branchDetail) {
+      return (
+        <SidebarProvider><AppSidebar /><SidebarInset className="overflow-hidden bg-background">
+          <div className="absolute inset-0 flex items-center justify-center">
+            <span className="size-5 animate-spin rounded-full border-2 border-foreground border-t-transparent" />
+          </div>
+        </SidebarInset></SidebarProvider>
+      )
+    }
+    if (!branchDetail) {
+      return (
+        <SidebarProvider><AppSidebar /><SidebarInset className="overflow-hidden bg-background">
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
+            <GitBranch className="size-8 mb-3 opacity-30" />
+            <p className="text-[14px] font-medium">Branch not found</p>
+            <Button variant="ghost" size="sm" className="mt-4" onClick={() => router.push("/dashboard/pulls")}>Back to Reviews</Button>
+          </div>
+        </SidebarInset></SidebarProvider>
+      )
+    }
+
+        const branchAuthor = branchRecord?.authorMember?.displayName || branchDetail.authorGithubUsername
+    const branchDiffSource = branchDetail.diff || fallbackDiff
+    let branchParsedFiles: any[] = []
+    try { branchParsedFiles = parseDiff(branchDiffSource) } catch { branchParsedFiles = parseDiff(fallbackDiff) }
+
+    return (
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset className="overflow-hidden bg-background">
+          <div className="absolute inset-0 flex w-full flex-col overflow-hidden text-sm bg-background">
+            <div className="h-14 flex items-center justify-between px-5 border-b shrink-0 bg-background z-10">
+              <div className="flex items-center gap-2 overflow-hidden whitespace-nowrap">
+                <SidebarTrigger className="-ml-2" />
+                <div className="flex items-center gap-1.5 font-medium text-[13px] text-muted-foreground ml-1">
+                  <span className="hover:text-foreground cursor-pointer transition-colors" onClick={() => router.push("/dashboard/pulls")}>Reviews</span>
+                  <ChevronRight className="size-3.5 opacity-50" />
+                  <div className="flex items-center gap-1.5 text-foreground px-1.5 py-1 rounded-md">
+                    <GitBranch className="size-4 text-sky-500" />
+                    <span>{branchDetail.headBranch}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-hidden flex">
+              <div className="flex-1 overflow-y-auto [&::-webkit-scrollbar]:hidden">
+                <div className="max-w-[980px] mx-auto px-8 py-8">
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-[12px] font-semibold text-sky-600">
+                      <GitBranch className="size-3.5" /> Branch ready to open
+                    </span>
+                    <span className="text-[12px] text-muted-foreground">
+                      {branchDetail.aheadBy} commit{branchDetail.aheadBy === 1 ? "" : "s"} ahead of {branchDetail.baseBranch}
+                    </span>
+                  </div>
+
+                  <div className="rounded-2xl border border-border/50 bg-background p-6 shadow-none">
+                    <input value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} className="text-[24px] font-semibold text-foreground leading-tight mb-4 w-full bg-transparent outline-none border-none" placeholder="Pull request title" />
+                    <textarea
+                      value={bodyDraft}
+                      onChange={(e) => setBodyDraft(e.target.value)}
+                      className="w-full text-[13px] text-muted-foreground whitespace-pre-wrap bg-muted/10 border border-border/30 rounded-xl p-4 outline-none resize-none overflow-hidden leading-relaxed"
+                      style={{ height: `${Math.max(160, ((bodyDraft || "").split("\n").length + 2) * 24)}px` }}
+                      placeholder="Describe what this branch introduces..."
+                    />
+
+                    <div className="grid grid-cols-2 gap-4 mt-6">
+                      <ReadOnlyPropertyRow label="Author" value={<span className="text-[13px]">{branchAuthor}</span>} icon={User} />
+                      <ReadOnlyPropertyRow label="Repo" value={<span className="text-[13px]">{branchDetail.githubRepoFullName}</span>} icon={GitFork} />
+                      <ReadOnlyPropertyRow label="Base" value={<span className="font-mono text-[11px] bg-muted/40 px-1.5 py-0.5 rounded border border-border/40">{branchDetail.baseBranch}</span>} icon={GitMerge} />
+                      <ReadOnlyPropertyRow label="Head" value={<span className="font-mono text-[11px] bg-sky-500/10 text-sky-600 px-1.5 py-0.5 rounded border border-sky-500/20">{branchDetail.headBranch}</span>} icon={GitBranch} iconColor="text-sky-500" />
+                    </div>
+                  </div>
+
+                  <div className="mt-8">
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-[15px] font-semibold text-foreground">Files changed</h3>
+                      <div className="flex items-center gap-2 text-sm">
+                        <span className="text-emerald-500 font-semibold">+{branchDetail.additions ?? 0}</span>
+                        <span className="text-red-500 font-semibold">-{branchDetail.deletions ?? 0}</span>
+                        <span className="text-muted-foreground">{branchDetail.changedFiles ?? 0} files</span>
+                      </div>
+                    </div>
+                    {branchParsedFiles.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed border-border/60 bg-muted/10 px-6 py-10 text-center text-muted-foreground text-[13px]">
+                        No file diff available.
+                      </div>
+                    ) : branchParsedFiles.map((file: any, idx: number) => (
+                      <div key={idx} className="mb-8 border border-border/40 rounded-xl overflow-hidden bg-background">
+                        <div className="px-4 py-2.5 bg-muted/10 border-b border-border/30 flex items-center justify-between">
+                          <span className="font-mono text-[12px] text-foreground">{file.newPath || file.oldPath}</span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <Diff viewType="split" diffType={file.type} hunks={file.hunks || []}>
+                            {(hunks) => hunks.map((hunk: any, hunkIndex: number) => <Hunk key={hunkIndex} hunk={hunk} />)}
+                          </Diff>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="w-[300px] xl:w-[320px] overflow-y-auto p-6 shrink-0 [&::-webkit-scrollbar]:hidden border-l border-border/60 bg-background flex flex-col gap-6">
+                <div className="bg-muted/20 border border-border/40 rounded-xl p-4 px-5">
+                  <h4 className="text-[12px] font-medium text-muted-foreground mb-3.5">Action Controls</h4>
+                  <div className="flex flex-col gap-3">
+                    <Button className="w-full bg-sky-600 hover:bg-sky-700 text-white shadow-none h-8 text-[12px] tracking-wide font-medium rounded-md" onClick={handleCreatePullRequest} disabled={isCreatingPr || !titleDraft.trim()}>
+                      {isCreatingPr ? <Loader2 className="size-3.5 animate-spin" /> : <GitPullRequest className="size-3.5" />} Open Pull Request
+                    </Button>
+                    <a href={branchDetail.githubUrl} target="_blank" rel="noopener noreferrer">
+                      <Button variant="outline" className="w-full h-8 shadow-none text-muted-foreground border-border/60 hover:bg-muted/40 text-[12px] rounded-md">View Branch on GitHub</Button>
+                    </a>
+                  </div>
+                </div>
+                <div className="bg-muted/30 rounded-xl p-4 flex flex-col gap-1">
+                  <ReadOnlyPropertyRow label="State" value={<span className="font-semibold text-sky-600">No pull request yet</span>} icon={GitBranch} iconColor="text-sky-500" />
+                  <ReadOnlyPropertyRow label="Author" value={<span>{branchAuthor}</span>} icon={User} />
+                  <ReadOnlyPropertyRow label="Base" value={<span className="font-mono text-[11px] bg-muted/40 px-1.5 py-0.5 rounded border border-border/40">{branchDetail.baseBranch}</span>} icon={GitMerge} />
+                  <ReadOnlyPropertyRow label="Head" value={<span className="font-mono text-[11px] bg-sky-500/10 text-sky-600 px-1.5 py-0.5 rounded border border-sky-500/20">{branchDetail.headBranch}</span>} icon={GitBranch} iconColor="text-sky-500" />
+                  <ReadOnlyPropertyRow label="Changes" value={<span className="flex items-center gap-2 text-[11px] font-mono"><span className="text-emerald-500 font-semibold bg-emerald-500/10 px-1 rounded">+{branchDetail.additions ?? 0}</span><span className="text-red-500 font-semibold bg-red-500/10 px-1 rounded">-{branchDetail.deletions ?? 0}</span><span className="text-muted-foreground">{branchDetail.changedFiles ?? 0} files</span></span>} icon={GitCommit} />
+                  <ReadOnlyPropertyRow label="Updated" value={<span className="text-muted-foreground">{timeAgo(branchRecord?.committedAt || branchDetail.commits?.[0]?.committedAt || Date.now())}</span>} icon={Clock} />
+                </div>
+              </div>
+            </div>
+          </div>
+        </SidebarInset>
+      </SidebarProvider>
+    )
+  }
+
   if (isCommitView) {
-    // ═══ COMMIT DETAIL VIEW ═══
+    // --- COMMIT DETAIL VIEW ---
     if (ghLoading && !commitDetail) {
       return (
         <SidebarProvider><AppSidebar /><SidebarInset className="overflow-hidden bg-background">
@@ -349,7 +1225,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
             <GitCommit className="size-8 mb-3 opacity-30" />
             <p className="text-[14px] font-medium">Commit not found</p>
             <p className="text-[12px] mt-1 opacity-60">{commitRepoFullName} @ {commitSha.substring(0, 7)}</p>
-            <Button variant="ghost" size="sm" className="mt-4" onClick={() => router.push("/dashboard/pulls")}>← Back to Reviews</Button>
+            <Button variant="ghost" size="sm" className="mt-4" onClick={() => router.push("/dashboard/pulls")}>Back to Reviews</Button>
           </div>
         </SidebarInset></SidebarProvider>
       )
@@ -483,7 +1359,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
     )
   }
 
-  // ═══ PR DETAIL VIEW (existing) ═══
+  // --- PR DETAIL VIEW (existing) ---
   if (pr === undefined || (pr === null && ghLoading)) {
     return (
       <SidebarProvider><AppSidebar /><SidebarInset className="overflow-hidden bg-background">
@@ -500,7 +1376,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
           <GitPullRequest className="size-8 mb-3 opacity-30" />
           <p className="text-[14px] font-medium">Pull request not found</p>
           <p className="text-[12px] mt-1 opacity-60">{repoFullName} #{prNumber}</p>
-          <Button variant="ghost" size="sm" className="mt-4" onClick={() => router.push("/dashboard/pulls")}>← Back to Reviews</Button>
+          <Button variant="ghost" size="sm" className="mt-4" onClick={() => router.push("/dashboard/pulls")}>Back to Reviews</Button>
         </div>
       </SidebarInset></SidebarProvider>
     )
@@ -529,7 +1405,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
       <SidebarInset className="overflow-hidden bg-background">
         <div className="absolute inset-0 flex flex-col overflow-hidden text-sm bg-background">
 
-          {/* ─── Header ─────────────────────────────────────── */}
+          {/* --- Header --------------------------------------- */}
           <div className="h-14 flex items-center justify-between px-6 border-b shrink-0 transition-all bg-background/95 backdrop-blur z-20 relative text-sm">
             <div className="flex items-center text-[13px] font-medium text-foreground gap-1.5">
               <SidebarTrigger className="-ml-3 mr-1" />
@@ -553,7 +1429,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
             </div>
           </div>
 
-          {/* ─── Split Layout ───────────────────────────────── */}
+          {/* --- Split Layout --------------------------------- */}
           <div className="flex-1 flex min-h-0 overflow-hidden">
 
             {/* LEFT: Main Content */}
@@ -568,14 +1444,14 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
                   <FileCode2 className="size-4" /> Files Changed <span className="px-1.5 py-[1px] rounded-full bg-muted border border-border/50 text-[10px] tabular-nums font-semibold mt-0.5">{prData.changedFiles || files.length}</span>
                 </button>
                 <button onClick={() => setView('ai')} className={`h-full border-b-2 transition-colors flex items-center gap-2 ${view === 'ai' ? 'border-[#5e6ad2] text-foreground font-semibold' : 'border-transparent hover:text-foreground'}`}>
-                  <Bot className="size-4" /> AI Review
+                  <ShieldCheck className="size-4" /> Review
                 </button>
               </div>
 
               {/* GSAP Canvas */}
               <div className="w-[300%] flex-1 min-h-0 flex overflow-hidden" ref={sliderRef}>
 
-                {/* ════ TAB 1: CONVERSATION ════ */}
+                {/* ---- TAB 1: CONVERSATION ---- */}
                 <div className="w-[33.333%] h-full overflow-y-auto px-16 py-12 [&::-webkit-scrollbar]:hidden">
                   <div className="max-w-3xl mx-auto w-full">
 
@@ -611,11 +1487,13 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
 
                     {/* Editable Description */}
                     {editingBody ? (
-                      <textarea
+                      <AutoGrowTextarea
                         autoFocus value={bodyDraft}
                         onChange={e => setBodyDraft(e.target.value)}
                         onBlur={handleBodySave}
-                        className="w-full text-[15px] leading-relaxed text-foreground mb-8 p-3 rounded-md border border-blue-500/30 bg-background outline-none resize-none min-h-[120px]"
+                        minHeight={120}
+                        className="mb-8 w-full overflow-hidden border-none bg-transparent px-2 py-2 text-[15px] leading-relaxed text-foreground outline-none ring-0 placeholder:text-muted-foreground/50"
+                        placeholder="Add description..."
                       />
                     ) : (
                       <p
@@ -702,7 +1580,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
                             </div>
                             <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground/60 rounded-full"><MoreHorizontal className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="left" className="text-xs">Review actions</TooltipContent></Tooltip>
                           </div>
-                          {review.body && <div className="p-4 py-3"><p className="text-[14px] text-foreground leading-relaxed">{review.body}</p></div>}
+                          {review.body && <ReviewActivityBody body={review.body} />}
                         </div>
                       ))}
 
@@ -756,7 +1634,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
                   </div>
                 </div>
 
-                {/* ════ TAB 2: FILES CHANGED ════ */}
+                {/* ---- TAB 2: FILES CHANGED ---- */}
                 <div className="w-[33.333%] h-full overflow-y-auto px-10 py-10 [&::-webkit-scrollbar]:hidden">
 
                   {/* File summary bar */}
@@ -841,245 +1719,40 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
                   </div>
                 </div>
 
-                {/* ════ TAB 3: AI REVIEW ════ */}
-                <div className="w-[33.333%] h-full relative flex flex-col items-center bg-background">
-                  <div className="flex-1 w-full max-w-4xl mx-auto overflow-y-auto px-8 pt-10 pb-40 [&::-webkit-scrollbar]:hidden flex flex-col gap-6">
-
-                    {/* ── No review yet ── */}
-                    {!aiReview && (
-                      <div className="h-full flex flex-col items-center justify-center mt-20">
-                        <div className="size-14 rounded-2xl bg-[#5e6ad2]/10 flex items-center justify-center mb-5">
-                          <Sparkles className="size-7 text-[#5e6ad2]" />
-                        </div>
-                        <span className="text-[16px] font-semibold text-foreground tracking-tight">AI Pull Request Review</span>
-                        <span className="text-[13px] text-muted-foreground mt-1.5 max-w-xs text-center leading-relaxed">Generate a structured code review covering quality, security, and potential issues.</span>
-                        <Button
-                          onClick={handleTriggerReview}
-                          disabled={isTriggering || !pr?._id}
-                          className="mt-6 h-9 bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white font-medium text-[13px] rounded-lg shadow-none gap-2 px-5"
-                        >
-                          {isTriggering ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />}
-                          Generate Review
-                        </Button>
-                      </div>
-                    )}
-
-                    {/* ── Review in progress ── */}
-                    {aiReview && aiReview.step !== "completed" && aiReview.step !== "failed" && (
-                      <div className="mt-16 flex flex-col items-center gap-6">
-                        <div className="size-12 rounded-2xl bg-[#5e6ad2]/10 flex items-center justify-center">
-                          <Loader2 className="size-6 text-[#5e6ad2] animate-spin" />
-                        </div>
-                        <div className="flex flex-col items-center gap-1.5">
-                          <span className="text-[14px] font-semibold text-foreground">Analyzing Pull Request</span>
-                          <span className="text-[12px] text-muted-foreground capitalize">{(aiReview.step || "pending").replace(/_/g, " ")}</span>
-                        </div>
-                        {/* Progress steps */}
-                        <div className="flex flex-col gap-2 mt-4 w-full max-w-xs">
-                          {["gathering_context", "analyzing_files", "synthesizing"].map((step) => {
-                            const stepOrder = ["pending","gathering_context","context_gathered","analyzing_files","files_analyzed","expanding_context","context_expanded","synthesizing","completed"]
-                            const currentIdx = stepOrder.indexOf(aiReview.step)
-                            const stepIdx = stepOrder.indexOf(step)
-                            const isDone = currentIdx > stepIdx
-                            const isActive = aiReview.step === step
-                            return (
-                              <div key={step} className={`flex items-center gap-3 px-3 py-2 rounded-lg text-[12px] font-medium transition-all ${
-                                isDone ? "text-emerald-600 dark:text-emerald-400 bg-emerald-500/5" :
-                                isActive ? "text-[#5e6ad2] bg-[#5e6ad2]/5" :
-                                "text-muted-foreground/50"
-                              }`}>
-                                {isDone ? <CheckCircle2 className="size-4 shrink-0" /> : isActive ? <Loader2 className="size-4 shrink-0 animate-spin" /> : <CircleDashed className="size-4 shrink-0" />}
-                                {step === "gathering_context" ? "Gathering PR context" : step === "analyzing_files" ? "Analyzing changed files" : "Synthesizing review"}
-                              </div>
-                            )
-                          })}
-                        </div>
-                        {aiReview.contextStats && (
-                          <div className="text-[11px] text-muted-foreground/60 mt-2">
-                            {aiReview.contextStats.filesAnalyzed} files · {aiReview.contextStats.totalDiffLines} diff lines · {aiReview.contextStats.linkedIssuesCount} linked issues
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {/* ── Review failed ── */}
-                    {aiReview?.step === "failed" && (
-                      <div className="mt-16 flex flex-col items-center gap-4">
-                        <div className="size-12 rounded-2xl bg-red-500/10 flex items-center justify-center">
-                          <XCircle className="size-6 text-red-500" />
-                        </div>
-                        <span className="text-[14px] font-semibold text-foreground">Review Failed</span>
-                        <span className="text-[12px] text-muted-foreground max-w-sm text-center leading-relaxed">{aiReview.error || "An unknown error occurred."}</span>
-                        <Button onClick={handleTriggerReview} disabled={isTriggering} variant="outline" size="sm" className="gap-2 mt-2 text-[12px] shadow-none">
-                          <RotateCcw className="size-3.5" /> Retry Review
-                        </Button>
-                      </div>
-                    )}
-
-                    {/* ── Completed review ── */}
-                    {aiReview?.step === "completed" && aiReview.review && (() => {
-                      const rv = aiReview.review as any
-                      const verdictConfig = rv.verdict === "approve"
-                        ? { icon: ThumbsUp, label: "Approve", color: "text-emerald-500", bg: "bg-emerald-500/10 border-emerald-500/20" }
-                        : rv.verdict === "request-changes"
-                        ? { icon: ThumbsDown, label: "Request Changes", color: "text-red-500", bg: "bg-red-500/10 border-red-500/20" }
-                        : { icon: HelpCircle, label: "Discuss", color: "text-amber-500", bg: "bg-amber-500/10 border-amber-500/20" }
-                      const VerdictIcon = verdictConfig.icon
-                      return (
-                        <>
-                          {/* Verdict banner */}
-                          <div className={`flex items-center justify-between px-5 py-4 rounded-xl border ${verdictConfig.bg}`}>
-                            <div className="flex items-center gap-3">
-                              <VerdictIcon className={`size-5 ${verdictConfig.color}`} />
-                              <div>
-                                <span className={`text-[14px] font-semibold ${verdictConfig.color}`}>{verdictConfig.label}</span>
-                                <span className="text-[11px] text-muted-foreground ml-2">Confidence: {Math.round((rv.confidence || 0) * 100)}%</span>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-[10px] text-muted-foreground font-mono">{aiReview.model || aiReview.provider}</span>
-                              <span className="text-[10px] text-muted-foreground">{aiReview.processingTimeMs ? `${(aiReview.processingTimeMs / 1000).toFixed(1)}s` : ""}</span>
-                            </div>
-                          </div>
-
-                          {/* Summary */}
-                          <div className="bg-muted/10 border border-border/40 rounded-xl p-5">
-                            <h4 className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider mb-2">Summary</h4>
-                            <p className="text-[13px] text-foreground leading-relaxed">{rv.summary}</p>
-                            <p className="text-[12px] text-muted-foreground mt-2 leading-relaxed"><span className="font-semibold text-foreground">Intent:</span> {rv.intent}</p>
-                          </div>
-
-                          {/* Code Quality */}
-                          <div className="bg-muted/10 border border-border/40 rounded-xl p-5">
-                            <div className="flex items-center justify-between mb-3">
-                              <h4 className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2"><Zap className="size-3.5" /> Code Quality</h4>
-                              <div className="flex items-center gap-2">
-                                <div className="w-20 h-1.5 rounded-full bg-muted overflow-hidden">
-                                  <div className="h-full rounded-full transition-all" style={{ width: `${(rv.codeQuality?.score || 5) * 10}%`, backgroundColor: rv.codeQuality?.score >= 7 ? '#22c55e' : rv.codeQuality?.score >= 5 ? '#eab308' : '#ef4444' }} />
-                                </div>
-                                <span className={`text-[13px] font-bold tabular-nums ${rv.codeQuality?.score >= 7 ? 'text-emerald-500' : rv.codeQuality?.score >= 5 ? 'text-amber-500' : 'text-red-500'}`}>{rv.codeQuality?.score}/10</span>
-                              </div>
-                            </div>
-                            {(rv.codeQuality?.highlights || []).length > 0 && (
-                              <div className="mb-3">
-                                <span className="text-[11px] font-semibold text-emerald-500 uppercase tracking-wider">Highlights</span>
-                                <ul className="mt-1.5 space-y-1">
-                                  {rv.codeQuality.highlights.map((h: string, i: number) => (
-                                    <li key={i} className="flex items-start gap-2 text-[12px] text-foreground/80"><CheckCircle2 className="size-3.5 text-emerald-500 mt-0.5 shrink-0" />{h}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                            {(rv.codeQuality?.concerns || []).length > 0 && (
-                              <div>
-                                <span className="text-[11px] font-semibold text-amber-500 uppercase tracking-wider">Concerns</span>
-                                <ul className="mt-1.5 space-y-1">
-                                  {rv.codeQuality.concerns.map((c: string, i: number) => (
-                                    <li key={i} className="flex items-start gap-2 text-[12px] text-foreground/80"><AlertTriangle className="size-3.5 text-amber-500 mt-0.5 shrink-0" />{c}</li>
-                                  ))}
-                                </ul>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Issues */}
-                          {(rv.potentialIssues || []).length > 0 && (
-                            <div className="bg-muted/10 border border-border/40 rounded-xl p-5">
-                              <h4 className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider mb-3 flex items-center gap-2"><AlertTriangle className="size-3.5" /> Potential Issues</h4>
-                              <div className="space-y-3">
-                                {rv.potentialIssues.map((issue: any, i: number) => (
-                                  <div key={i} className="flex items-start gap-3 text-[12px]">
-                                    <span className={`px-1.5 py-[1px] rounded text-[10px] font-bold uppercase tracking-wider shrink-0 mt-0.5 ${
-                                      issue.severity === "critical" ? "bg-red-500/10 text-red-500" :
-                                      issue.severity === "warning" ? "bg-amber-500/10 text-amber-500" :
-                                      "bg-blue-500/10 text-blue-500"
-                                    }`}>{issue.severity}</span>
-                                    <div className="flex-1">
-                                      <span className="font-mono text-[11px] text-muted-foreground">{issue.file}</span>
-                                      <p className="text-foreground/80 mt-0.5">{issue.description}</p>
-                                      {issue.suggestion && <p className="text-muted-foreground mt-1 italic">→ {issue.suggestion}</p>}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Security */}
-                          {rv.security?.hasRisks && (
-                            <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-5">
-                              <h4 className="text-[12px] font-semibold text-red-500 uppercase tracking-wider mb-2 flex items-center gap-2"><Shield className="size-3.5" /> Security Findings</h4>
-                              <ul className="space-y-1.5">
-                                {(rv.security.findings || []).map((f: string, i: number) => (
-                                  <li key={i} className="flex items-start gap-2 text-[12px] text-foreground/80"><XCircle className="size-3.5 text-red-500 mt-0.5 shrink-0" />{f}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          {/* Tradeoffs */}
-                          {(rv.tradeoffs || []).length > 0 && (
-                            <div className="bg-muted/10 border border-border/40 rounded-xl p-5">
-                              <h4 className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-2"><Info className="size-3.5" /> Trade-offs</h4>
-                              <ul className="space-y-1.5">
-                                {rv.tradeoffs.map((t: string, i: number) => (
-                                  <li key={i} className="flex items-start gap-2 text-[12px] text-foreground/80"><CircleDashed className="size-3.5 text-muted-foreground mt-0.5 shrink-0" />{t}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          {/* Retry button */}
-                          <div className="flex justify-center pt-2">
-                            <Button onClick={handleTriggerReview} disabled={isTriggering} variant="ghost" size="sm" className="gap-2 text-[11px] text-muted-foreground hover:text-foreground">
-                              <RotateCcw className="size-3" /> Re-run Review
-                            </Button>
-                          </div>
-
-                          {/* ── Follow-up Chat ── */}
-                          {(aiChatMessages || []).length > 0 && (
-                            <>
-                              <div className="py-2"><Separator className="bg-border/60" /></div>
-                              <h4 className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider">Follow-up</h4>
-                              {aiChatMessages!.map((msg, i) => (
-                                <div key={i} className={`flex w-full ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                                  {msg.role === "user" ? (
-                                    <div className="bg-muted/40 text-foreground text-[13px] px-4 py-2.5 rounded-[14px] rounded-tr-[4px] max-w-[80%] font-medium leading-relaxed border border-border/40">{msg.content}</div>
-                                  ) : (
-                                    <div className="flex gap-3 w-full max-w-[95%]">
-                                      <Avatar className="size-[22px] border border-border/40 bg-zinc-100 dark:bg-zinc-800 shrink-0 mt-1"><AvatarFallback className="text-[10px]"><Bot className="size-3" /></AvatarFallback></Avatar>
-                                      <div className="text-[13px] text-foreground/90 leading-[1.6] pt-1 font-medium bg-transparent whitespace-pre-wrap">{msg.content}</div>
-                                    </div>
-                                  )}
-                                </div>
-                              ))}
-                            </>
-                          )}
-                        </>
-                      )
-                    })()}
-
-                  </div>
-
-                  {/* Chat input — only shown when review is completed */}
-                  {aiReview?.step === "completed" && (
-                    <div className="absolute w-full max-w-3xl px-8 bottom-6 left-1/2 -translate-x-1/2 z-20">
-                      <div className="w-full bg-background border border-border/60 rounded-xl overflow-hidden flex flex-col min-h-[90px] transition-all focus-within:border-[#5e6ad2]/50">
-                        <div className="flex-1 p-3 px-4">
-                          <textarea value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendChat() } }} placeholder="Ask a follow-up question about this review..." className="w-full h-full bg-transparent resize-none border-none outline-none text-[13px] text-foreground placeholder:text-muted-foreground/50 leading-relaxed font-medium [&::-webkit-scrollbar]:hidden" />
-                        </div>
-                        <div className="px-2 pb-2 flex items-center justify-end mt-auto bg-transparent">
-                          <Button onClick={handleSendChat} disabled={!chatInput.trim()} size="icon" className="h-7 w-7 rounded-lg bg-[#5e6ad2] text-white hover:bg-[#5e6ad2]/90 transition-colors shadow-none disabled:opacity-50"><ArrowUpCircle className="size-4" strokeWidth={2.3} /></Button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                {/* ---- TAB 3: REVIEW CHAT ---- */}
+                <PullReviewChat
+                  repoLabel={repoFullName || "co-work"}
+                  prTitle={prData.title}
+                  aiReview={aiReview}
+                  aiChatMessages={aiChatMessages}
+                  reviewHub={reviewHub}
+                  filteredReviewThreads={filteredReviewThreads}
+                  selectedThreadId={selectedThreadId}
+                  selectedReviewThread={selectedReviewThread}
+                  selectedThreadComments={selectedThreadComments}
+                  reviewSourceFilter={reviewSourceFilter}
+                  setReviewSourceFilter={setReviewSourceFilter}
+                  setSelectedThreadId={setSelectedThreadId}
+                  chatInput={chatInput}
+                  setChatInput={setChatInput}
+                  handleTriggerReview={handleTriggerReview}
+                  handleSendChat={handleSendChat}
+                  handleRefreshReviews={handleRefreshReviews}
+                  isTriggering={isTriggering}
+                  isRefreshingReviews={isRefreshingReviews}
+                  githubUrl={prData.githubUrl}
+                  reviewStatusLabel={reviewStatusLabel}
+                  reviewSourceLabel={reviewSourceLabel}
+                  reviewFreshnessLabel={reviewFreshnessLabel}
+                  staleReviewReason={staleReviewReason}
+                  additions={additions}
+                  deletions={deletions}
+                  changedFiles={prData.changedFiles || files.length}
+                />
 
               </div>
             </div>
-
-            {/* ─── RIGHT: Properties Sidebar ─────────────────── */}
+            {/* --- RIGHT: Properties Sidebar ------------------- */}
             <div className="w-[300px] xl:w-[320px] overflow-y-auto p-6 shrink-0 [&::-webkit-scrollbar]:hidden border-l border-border/60 bg-background flex flex-col gap-6">
 
               {/* Action Controls */}
@@ -1110,16 +1783,29 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
 
                 {/* Reviewers (read-only) */}
                 <ReadOnlyPropertyRow label="Reviewers" value={
-                  <div className="flex flex-col gap-1">
+                  <div className="flex min-w-0 flex-col gap-2 py-0.5">
                     {ghReviewers.length > 0 ? ghReviewers.map((r: any, i: number) => (
-                      <span key={i} className="flex items-center gap-1.5">
-                        <Avatar className="size-[18px] border bg-emerald-100 text-emerald-600"><AvatarFallback className="text-[8px] font-bold">{getInitials(r.githubUsername)}</AvatarFallback></Avatar>
-                        {r.githubUsername}
-                        <span className={`ml-1 px-1.5 py-[1px] rounded text-[9.5px] font-semibold uppercase tracking-wider ${
-                          r.state === "approved" ? "bg-emerald-500/10 text-emerald-500" :
-                          r.state === "changes_requested" ? "bg-red-500/10 text-red-500" : "bg-amber-500/10 text-amber-500"
-                        }`}>{(r.state || "pending").replace(/_/g, " ")}</span>
-                      </span>
+                      <div
+                        key={i}
+                        className="flex min-w-0 flex-col gap-2 rounded-lg border border-border/35 bg-background/55 px-2.5 py-2"
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Avatar className="size-[18px] shrink-0 border bg-emerald-100 text-emerald-600">
+                            <AvatarFallback className="text-[8px] font-bold">{getInitials(r.githubUsername)}</AvatarFallback>
+                          </Avatar>
+                          <span className="truncate text-[12px] font-medium text-foreground/90">
+                            {r.githubUsername}
+                          </span>
+                        </div>
+                        <span
+                          className={`inline-flex w-fit max-w-full items-center rounded-full px-2 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.12em] ${
+                            r.state === "approved" ? "bg-emerald-500/10 text-emerald-500" :
+                            r.state === "changes_requested" ? "bg-red-500/10 text-red-500" : "bg-amber-500/10 text-amber-500"
+                          }`}
+                        >
+                          {(r.state || "pending").replace(/_/g, " ")}
+                        </span>
+                      </div>
                     )) : <span className="text-muted-foreground">No reviewers</span>}
                   </div>
                 } icon={CheckCircle2} />
@@ -1252,3 +1938,4 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
     </SidebarProvider>
   )
 }
+

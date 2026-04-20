@@ -11,11 +11,12 @@ import {
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Separator } from "@/components/ui/separator"
+import Image from "next/image"
 
 import {
   PlayCircle, ChevronRight, Star, MoreHorizontal, Link2, ArrowUpRight,
   Pencil, Info, Moon, Sun, Monitor, LogOut, CheckCircle2, ExternalLink,
-  Building2, Loader2, Trash2, RefreshCw, Eye, EyeOff, KeyRound
+  Building2, Loader2, Trash2, RefreshCw, Eye, EyeOff, KeyRound, Bot, Zap
 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { useAuthActions } from "@convex-dev/auth/react"
@@ -118,45 +119,56 @@ function GitHubInstallationCard({
 // ─── Main Settings Page ──────────────────────────────────────────
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme()
-  const { signOut } = useAuthActions()
+  const { signIn, signOut } = useAuthActions()
   const router = useRouter()
+  const searchParams = useSearchParams()
 
   const user = useQuery(api.users.current)
 
-  const [installations, setInstallations] = React.useState<any[]>([])
-  const [isLoadingInstallations, setIsLoadingInstallations] = React.useState(true)
+  const installations = useQuery(api.github.getMyInstallations)
+  const [isConnectingInstallation, setIsConnectingInstallation] = React.useState(false)
+  const [isRefreshingGitHubAccess, setIsRefreshingGitHubAccess] = React.useState(false)
+  const handledInstallationId = React.useRef<string | null>(null)
 
   const saveInstallation = useMutation(api.github.saveInstallation)
+  const bootstrapFromInstallation = useMutation(api.organizations.bootstrapFromInstallation)
 
-  // Fetch true live installations directly from GitHub and sync to Convex
   React.useEffect(() => {
-    async function load() {
-      try {
-        const { fetchGitHubInstallations } = await import("./actions")
-        const data = await fetchGitHubInstallations()
-        setInstallations(data)
+    const installationIdParam = searchParams.get("installation_id")
+    if (!installationIdParam) return
+    if (handledInstallationId.current === installationIdParam) return
 
-        // Auto-sync each installation to Convex so the bootstrap flow can find them
-        for (const inst of data) {
-          try {
-            await saveInstallation({
-              installationId: inst.installationId,
-              accountLogin: inst.accountLogin,
-              accountType: inst.accountType,
-              accountAvatarUrl: inst.accountAvatarUrl,
-            })
-          } catch (err) {
-            // Ignore — may already exist
-          }
+    handledInstallationId.current = installationIdParam
+    setIsConnectingInstallation(true)
+
+    ;(async () => {
+      try {
+        const response = await fetch(`/api/github/installation/${installationIdParam}`)
+        if (!response.ok) {
+          throw new Error("Failed to fetch installation details")
         }
-      } catch (err) {
-        console.error("Failed to load installations", err)
+
+        const installation = await response.json()
+
+        await saveInstallation({
+          installationId: installation.installationId,
+          accountLogin: installation.accountLogin,
+          accountType: installation.accountType,
+          accountAvatarUrl: installation.accountAvatarUrl,
+        })
+
+        await bootstrapFromInstallation({
+          installationId: installation.installationId,
+        })
+
+        router.replace("/dashboard/settings")
+      } catch (error) {
+        console.error("Failed to connect GitHub installation", error)
       } finally {
-        setIsLoadingInstallations(false)
+        setIsConnectingInstallation(false)
       }
-    }
-    load()
-  }, [])
+    })()
+  }, [bootstrapFromInstallation, router, saveInstallation, searchParams])
 
   // ── Handlers ───────────────────────────────────────────────
   const handleSignOut = async () => {
@@ -182,7 +194,19 @@ export default function SettingsPage() {
     window.open(`https://github.com/settings/installations/${installationId}`, '_blank')
   }
 
-  const hasInstallations = installations.length > 0
+  const handleRefreshGitHubAccess = async () => {
+    setIsRefreshingGitHubAccess(true)
+    try {
+      await signIn("github", { redirectTo: "/dashboard/settings" })
+    } catch (error) {
+      console.error("Failed to refresh GitHub access", error)
+      setIsRefreshingGitHubAccess(false)
+    } finally {
+      setIsRefreshingGitHubAccess(false)
+    }
+  }
+
+  const hasInstallations = (installations?.length ?? 0) > 0
 
   return (
     <SidebarProvider>
@@ -346,7 +370,7 @@ export default function SettingsPage() {
                       {/* Connected installations */}
                       {hasInstallations && (
                         <div className="flex flex-col gap-3">
-                          {installations.map((inst) => (
+                          {(installations ?? []).map((inst) => (
                             <GitHubInstallationCard
                               key={inst.installationId}
                               installation={inst}
@@ -357,7 +381,9 @@ export default function SettingsPage() {
                       )}
 
                       {/* Connect button */}
-                      <div className="border border-dashed border-border/80 rounded-[10px] bg-background overflow-hidden p-4 px-6 flex items-center justify-between group hover:border-border hover:bg-muted/30 transition-all cursor-pointer" onClick={handleInstallApp}>
+                      <div className="border border-dashed border-border/80 rounded-[10px] bg-background overflow-hidden p-4 px-6 flex items-center justify-between group hover:border-border hover:bg-muted/30 transition-all cursor-pointer" onClick={() => {
+                        if (!isConnectingInstallation) handleInstallApp()
+                      }}>
                         <div className="flex items-center gap-5">
                           <div className="size-11 rounded-[10px] flex items-center justify-center bg-muted/40 border border-border/50">
                             <GithubIcon className="size-5 text-foreground" />
@@ -381,14 +407,62 @@ export default function SettingsPage() {
                             size="sm"
                             className="pointer-events-none text-muted-foreground gap-1.5"
                           >
-                            {hasInstallations ? "Add" : "Connect"} <ArrowUpRight className="size-3.5" />
+                            {isConnectingInstallation ? "Connecting" : hasInstallations ? "Add" : "Connect"} {isConnectingInstallation ? <Loader2 className="size-3.5 animate-spin" /> : <ArrowUpRight className="size-3.5" />}
                           </Button>
                         </div>
                       </div>
+
+                      {!hasInstallations && (
+                        <div className="border border-border/60 rounded-[10px] bg-background p-4 px-5">
+                          <div className="flex flex-col gap-1">
+                            <span className="text-[13px] font-semibold text-foreground">
+                              Already in a connected organization?
+                            </span>
+                            <span className="text-[12px] text-muted-foreground leading-relaxed">
+                              Refresh your GitHub access and we’ll automatically attach you to any organization where the app is already installed.
+                            </span>
+                          </div>
+
+                          <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <span className="text-[12px] text-muted-foreground">
+                              Use this if a teammate already installed the GitHub app for your org.
+                            </span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={isRefreshingGitHubAccess}
+                              onClick={() => void handleRefreshGitHubAccess()}
+                              className="h-9 text-[12px] gap-1.5"
+                            >
+                              {isRefreshingGitHubAccess ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="size-3.5" />
+                              )}
+                              Refresh GitHub access
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </div>
 
                   {/* ── Claude Connection ── */}
+                  <Separator className="bg-border/60" />
+
+                  <div>
+                    <div className="flex flex-col mb-4">
+                      <span className="text-[14.5px] font-semibold text-foreground">Codex Agent</span>
+                      <span className="text-[13px] text-muted-foreground mt-1 max-w-xl leading-relaxed">
+                        Connect Codex so users can start issue-fixing workflows and prepare pull requests.
+                      </span>
+                    </div>
+
+                    <CodexSettingsCard />
+                  </div>
+
+                  <Separator className="bg-border/60" />
+
                   <div>
                     <div className="flex flex-col mb-4">
                       <span className="text-[14.5px] font-semibold text-foreground">Claude Intelligence</span>
@@ -411,6 +485,41 @@ export default function SettingsPage() {
 }
 
 // ─── Claude Settings Card ──────────────────────────────────────
+function CodexSettingsCard() {
+  return (
+    <div className="border border-dashed border-border/80 rounded-[10px] bg-background overflow-hidden p-4 px-6 flex items-center justify-between group hover:border-border hover:bg-muted/30 transition-all cursor-pointer">
+      <div className="flex items-center gap-5">
+        <div className="size-11 rounded-[10px] flex items-center justify-center bg-muted/40 border border-border/50">
+          <Image
+            src="/codex logo.png"
+            alt="Codex logo"
+            width={22}
+            height={22}
+            className="h-[22px] w-[22px] object-contain"
+          />
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[14px] font-semibold text-foreground tracking-tight">
+            Connect Codex
+          </span>
+          <span className="text-[13px] text-muted-foreground mt-0.5 max-w-sm leading-relaxed">
+            Enable GPT-5.4 Codex for issue fixing and pull request workflows.
+          </span>
+        </div>
+      </div>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="pointer-events-none text-muted-foreground gap-1.5"
+        >
+          Connect <ArrowUpRight className="size-3.5" />
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function ClaudeSettingsCard() {
   const aiSettings = useQuery(api.aiReviews.getMySettings)
   const saveSettings = useMutation(api.aiReviews.saveAISettings)
@@ -419,14 +528,23 @@ function ClaudeSettingsCard() {
   const [showKey, setShowKey] = React.useState(false)
   const [saving, setSaving] = React.useState(false)
   const [clearing, setClearing] = React.useState(false)
+  const [selectedProvider, setSelectedProvider] = React.useState<"groq" | "anthropic">("groq")
 
   const isConnected = aiSettings?.hasAnthropicKey
+  const preferredProvider = aiSettings?.preferredProvider || "groq"
+
+  React.useEffect(() => {
+    setSelectedProvider(preferredProvider)
+  }, [preferredProvider])
 
   const handleSave = async () => {
     if (!apiKey.trim()) return
     setSaving(true)
     try {
-      await saveSettings({ anthropicApiKey: apiKey, preferredProvider: "anthropic" })
+      await saveSettings({
+        anthropicApiKey: apiKey,
+        preferredProvider: selectedProvider,
+      })
       setApiKey("")
       setShowKey(false)
     } catch {
@@ -440,10 +558,28 @@ function ClaudeSettingsCard() {
     setClearing(true)
     try {
       await clearKey()
+      setSelectedProvider("groq")
     } catch {
       // error handled by Convex
     } finally {
       setClearing(false)
+    }
+  }
+
+  const handleProviderChange = async (provider: "groq" | "anthropic") => {
+    if (provider === "anthropic" && !isConnected) {
+      setSelectedProvider(provider)
+      return
+    }
+
+    setSelectedProvider(provider)
+    setSaving(true)
+    try {
+      await saveSettings({ preferredProvider: provider })
+    } catch {
+      setSelectedProvider(preferredProvider)
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -454,7 +590,7 @@ function ClaudeSettingsCard() {
           <div className={`size-11 rounded-[10px] flex items-center justify-center border ${
             isConnected ? "bg-emerald-500/10 border-emerald-500/20" : "bg-amber-500/10 border-amber-500/20"
           }`}>
-            <AnthropicIcon className={`size-5 ${isConnected ? "text-emerald-600" : "text-amber-600"}`} />
+            <AnthropicIcon className={`size-8 ${isConnected ? "text-emerald-600" : "text-amber-600"}`} />
           </div>
           <div className="flex flex-col">
             <div className="flex items-center gap-2">
@@ -466,7 +602,9 @@ function ClaudeSettingsCard() {
               )}
             </div>
             <span className="text-[13px] text-muted-foreground mt-0.5 max-w-[400px] leading-relaxed">
-              {isConnected ? "Claude is active. AI reviews will use Claude by default." : "Attach a direct API key to enable Claude-powered reviews"}
+              {isConnected
+                ? "Claude is available for reviews, but Groq stays the default until you switch providers."
+                : "Attach a direct API key to make Claude available as an optional provider."}
             </span>
           </div>
         </div>
@@ -483,8 +621,55 @@ function ClaudeSettingsCard() {
           </Button>
         )}
       </div>
+      <div className="px-6 pb-5 pt-1 space-y-4">
+        <div className="rounded-[12px] border border-border/60 bg-muted/10 p-3.5">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col">
+              <span className="text-[13px] font-semibold text-foreground">Default review model</span>
+              <span className="text-[12px] text-muted-foreground mt-0.5">
+                Pick the provider new reviews should use. Groq remains the safe default.
+              </span>
+            </div>
+            <div className="flex items-center gap-1 rounded-xl border border-border/60 bg-background p-1">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => handleProviderChange("groq")}
+                disabled={saving}
+                className={`h-8 rounded-lg px-3 text-[12px] font-medium shadow-none ${
+                  selectedProvider === "groq"
+                    ? "bg-foreground text-background hover:bg-foreground/90"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Zap className="size-3.5" />
+                Groq
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => handleProviderChange("anthropic")}
+                disabled={saving}
+                className={`h-8 rounded-lg px-3 text-[12px] font-medium shadow-none ${
+                  selectedProvider === "anthropic"
+                    ? "bg-foreground text-background hover:bg-foreground/90"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Bot className="size-3.5" />
+                Claude
+              </Button>
+            </div>
+          </div>
+          {selectedProvider === "anthropic" && !isConnected && (
+            <p className="mt-3 text-[11px] text-amber-600">
+              Add an Anthropic key below before Claude can be used for new reviews.
+            </p>
+          )}
+        </div>
+
       {!isConnected && (
-        <div className="px-6 pb-5 pt-1">
+          <div>
           <div className="flex items-center gap-2">
             <div className="relative flex-1">
               <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground" />
@@ -506,14 +691,15 @@ function ClaudeSettingsCard() {
               className="h-9 bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white text-[12px] font-medium shadow-none gap-1.5 px-4"
             >
               {saving ? <Loader2 className="size-3 animate-spin" /> : <CheckCircle2 className="size-3" />}
-              Save Key
+              Save Claude Key
             </Button>
           </div>
           <p className="text-[11px] text-muted-foreground/60 mt-2 leading-relaxed">
-            Your key is encrypted with AES-256-GCM before storage. It is never exposed to the client.
+            Your key is encrypted with AES-256-GCM before storage. It is never exposed to the client, and saving it does not change the default provider unless you choose Claude above.
           </p>
-        </div>
+          </div>
       )}
+      </div>
     </div>
   )
 }

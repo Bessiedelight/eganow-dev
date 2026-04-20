@@ -6,24 +6,42 @@ import gsap from "gsap"
 import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
 import { useOrganization } from "@/hooks/use-organization"
+import { fetchRepoCommits, fetchRepoPullRequests } from "@/lib/github/actions"
+import { createPortal } from "react-dom"
+import { toast } from "sonner"
 import { AppSidebar } from "@/components/app-sidebar"
+import { CreateIssueDialog } from "@/components/create-issue-dialog"
 import {
   SidebarInset,
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
+import { AutoGrowTextarea } from "@/components/auto-grow-textarea"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Separator } from "@/components/ui/separator"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   FolderKanban, Star, MoreHorizontal, Link2, Copy, GitFork, ChevronDown,
   Sparkles, Target, Plus, Lock, AlignLeft, Users, CalendarClock, Smile,
   Filter, SortAsc, Grid2X2, Settings2, CheckCircle2, ChevronRight, PieChart,
   Calendar, LayoutGrid, List, CircleDot, User, SignalHigh, Activity, Paperclip, AlertCircle, RefreshCw, MessageSquare,
   GitPullRequest, GitMerge, FileCode2, GitCommit,
-  Timer, Gauge, ShieldAlert, Hourglass, XCircle, Clock
+  Timer, Gauge, ShieldAlert, Hourglass, XCircle, Clock, Check, Pencil, Trash2, ExternalLink
 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { DragDropContext, Droppable, Draggable } from "@hello-pangea/dnd"
 import type { Id } from "@/convex/_generated/dataModel"
 
@@ -46,9 +64,13 @@ export default function ProjectDetailView({ params }: { params: Promise<{ projec
   const project = useQuery(api.projects.getByIdEnriched, { projectId })
   const issues = useQuery(api.projects.listIssues, { projectId })
   const prs = useQuery(api.projects.listPullRequests, { projectId })
-  const stats = useQuery(api.projects.getStats, { projectId })
+  const boardData = useQuery(api.projects.getBoardData, { projectId })
+  const dashboardData = useQuery(api.projects.getDashboardData, { projectId })
   const activity = useQuery(api.projects.listActivity, { projectId })
   const updateIssue = useMutation(api.issues.update)
+  const linkPullRequestToIssue = useMutation(api.pullRequests.linkToIssue)
+  const syncPullRequest = useMutation(api.pullRequests.syncFromGitHub)
+  const syncCommit = useMutation(api.commits.syncFromGitHub)
 
   const [view, setView] = React.useState<Tab>("overview")
   const sliderRef = React.useRef<HTMLDivElement>(null)
@@ -142,9 +164,9 @@ export default function ProjectDetailView({ params }: { params: Promise<{ projec
           <div className="flex-1 min-h-0 overflow-hidden relative">
             <div className="h-full flex" style={{ width: "400%" }} ref={sliderRef}>
               <div className="h-full flex-col flex overflow-hidden shrink-0" style={{ width: "25%" }}><OverviewTab project={project} activity={activity} issues={issues} prs={prs} /></div>
-              <div className="h-full flex-col flex overflow-hidden shrink-0" style={{ width: "25%" }}><BoardTab issues={issues} updateIssue={updateIssue} /></div>
+              <div className="h-full flex-col flex overflow-hidden shrink-0" style={{ width: "25%" }}><BoardTab boardData={boardData} updateIssue={updateIssue} linkPullRequestToIssue={linkPullRequestToIssue} projectId={projectId} /></div>
               <div className="h-full flex-col flex overflow-hidden shrink-0" style={{ width: "25%" }}><TraceabilityTab issues={issues} prs={prs} activity={activity} /></div>
-              <div className="h-full flex-col flex overflow-hidden shrink-0" style={{ width: "25%" }}><DashboardTab stats={stats} prs={prs} /></div>
+              <div className="h-full flex-col flex overflow-hidden shrink-0" style={{ width: "25%" }}><DashboardTab project={project} organization={organization} dashboardData={dashboardData} syncPullRequest={syncPullRequest} syncCommit={syncCommit} /></div>
             </div>
           </div>
 
@@ -171,6 +193,16 @@ function EditablePropertyRow({ label, icon: Icon, children }: { label: string; i
 // OVERVIEW TAB
 // ───────────────────────────────────────────────────────────────────────────
 function OverviewTab({ project, activity, issues, prs }: { project: any; activity: any[] | undefined; issues: any[] | undefined; prs: any[] | undefined }) {
+  const updateProject = useMutation(api.projects.update)
+  const projectLinks = useQuery(api.projects.listLinks, { projectId: project._id })
+  const projectFiles = useQuery(api.projects.listFiles, { projectId: project._id })
+  const leadCandidates = useQuery(api.projects.listLeadCandidates, { projectId: project._id })
+  const addProjectLink = useMutation(api.projects.addLink)
+  const removeProjectLink = useMutation(api.projects.removeLink)
+  const generateFileUploadUrl = useMutation(api.projects.generateFileUploadUrl)
+  const saveUploadedFile = useMutation(api.projects.saveUploadedFile)
+  const removeProjectFile = useMutation(api.projects.removeFile)
+
   const recentIssues = issues?.slice(0, 5) || []
   const recentPRs = prs?.filter((p: any) => p.state === "open").slice(0, 5) || []
   const recentActivity = activity?.slice(0, 10) || []
@@ -179,6 +211,154 @@ function OverviewTab({ project, activity, issues, prs }: { project: any; activit
   const doneIssues = project.counts?.doneIssues ?? 0
   const progressPct = totalIssues > 0 ? Math.round((doneIssues / totalIssues) * 100) : 0
 
+  const [isEditingTitle, setIsEditingTitle] = React.useState(false)
+  const [titleDraft, setTitleDraft] = React.useState(project.name || "")
+  const [isEditingDescription, setIsEditingDescription] = React.useState(false)
+  const [descriptionDraft, setDescriptionDraft] = React.useState(project.description || "")
+  const [linkLabel, setLinkLabel] = React.useState("")
+  const [linkUrl, setLinkUrl] = React.useState("")
+  const [isAddingLink, setIsAddingLink] = React.useState(false)
+  const [isUploadingFile, setIsUploadingFile] = React.useState(false)
+  const [isSavingLead, setIsSavingLead] = React.useState(false)
+  const [selectedLeadId, setSelectedLeadId] = React.useState(project.leadMemberId || "")
+  const fileInputRef = React.useRef<HTMLInputElement>(null)
+
+  React.useEffect(() => {
+    setTitleDraft(project.name || "")
+  }, [project.name])
+
+  React.useEffect(() => {
+    setDescriptionDraft(project.description || "")
+  }, [project.description])
+
+  React.useEffect(() => {
+    setSelectedLeadId(project.leadMemberId || "")
+  }, [project.leadMemberId])
+
+  const handleSaveTitle = async () => {
+    const nextTitle = titleDraft.trim()
+    if (!nextTitle || nextTitle === project.name) {
+      setIsEditingTitle(false)
+      setTitleDraft(project.name || "")
+      return
+    }
+
+    try {
+      await updateProject({ projectId: project._id, name: nextTitle })
+      toast.success("Project title updated")
+      setIsEditingTitle(false)
+    } catch {
+      toast.error("Failed to update project title")
+    }
+  }
+
+  const handleSaveDescription = async () => {
+    const nextDescription = descriptionDraft.trim()
+    if (nextDescription === (project.description || "")) {
+      setIsEditingDescription(false)
+      return
+    }
+
+    try {
+      await updateProject({
+        projectId: project._id,
+        description: nextDescription || undefined,
+      })
+      toast.success("Project description updated")
+      setIsEditingDescription(false)
+    } catch {
+      toast.error("Failed to update project description")
+    }
+  }
+
+  const handleAddLink = async () => {
+    const rawUrl = linkUrl.trim()
+    if (!rawUrl) return
+
+    let normalizedUrl = rawUrl
+    try {
+      normalizedUrl = new URL(rawUrl).toString()
+    } catch {
+      try {
+        normalizedUrl = new URL(`https://${rawUrl}`).toString()
+      } catch {
+        toast.error("Enter a valid URL")
+        return
+      }
+    }
+
+    setIsAddingLink(true)
+    try {
+      await addProjectLink({
+        projectId: project._id,
+        label: linkLabel.trim() || undefined,
+        url: normalizedUrl,
+      })
+      setLinkLabel("")
+      setLinkUrl("")
+      toast.success("Link added")
+    } catch {
+      toast.error("Failed to add link")
+    } finally {
+      setIsAddingLink(false)
+    }
+  }
+
+  const handleUploadFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setIsUploadingFile(true)
+    try {
+      const uploadUrl = await generateFileUploadUrl({})
+      const response = await fetch(uploadUrl, {
+        method: "POST",
+        headers: { "Content-Type": file.type || "application/octet-stream" },
+        body: file,
+      })
+
+      if (!response.ok) throw new Error("Upload failed")
+      const { storageId } = await response.json()
+
+      await saveUploadedFile({
+        projectId: project._id,
+        storageId,
+        fileName: file.name,
+        contentType: file.type || undefined,
+        size: file.size,
+      })
+
+      toast.success("File added")
+    } catch {
+      toast.error("Failed to upload file")
+    } finally {
+      setIsUploadingFile(false)
+      if (event.target) event.target.value = ""
+    }
+  }
+
+  const handleLeadChange = async (nextLeadId: string) => {
+    if (!nextLeadId) {
+      setSelectedLeadId(project.leadMemberId || "")
+      return
+    }
+
+    setSelectedLeadId(nextLeadId)
+    setIsSavingLead(true)
+    try {
+      await updateProject({
+        projectId: project._id,
+        leadMemberId: nextLeadId as Id<"members">,
+      })
+      toast.success("Project lead updated")
+    } catch {
+      setSelectedLeadId(project.leadMemberId || "")
+      toast.error("Failed to update project lead")
+    } finally {
+      setIsSavingLead(false)
+    }
+  }
+
   return (
     <div className="flex-1 flex min-h-0 overflow-hidden">
       {/* ─── LEFT: Main Content ─────────────────────────── */}
@@ -186,17 +366,191 @@ function OverviewTab({ project, activity, issues, prs }: { project: any; activit
         <div className="max-w-[880px] mx-auto w-full px-12 py-12">
           
           {/* Top Section: Brief & Description */}
-          <h1 className="text-3xl font-semibold tracking-tight mb-6 text-foreground leading-[1.3] flex items-center gap-3">
-            {project.name}
-          </h1>
+          <div className="mb-6">
+            {isEditingTitle ? (
+              <div className="flex items-center gap-2">
+                <input
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  className="w-full bg-transparent border border-border/60 rounded-lg px-3 py-2 text-3xl font-semibold tracking-tight text-foreground outline-none"
+                  autoFocus
+                />
+                <Button size="icon" variant="outline" className="h-9 w-9" onClick={handleSaveTitle}>
+                  <Check className="size-4" />
+                </Button>
+                <Button size="icon" variant="ghost" className="h-9 w-9" onClick={() => { setIsEditingTitle(false); setTitleDraft(project.name || "") }}>
+                  <XCircle className="size-4" />
+                </Button>
+              </div>
+            ) : (
+              <div className="group flex items-center gap-3">
+                <h1 className="text-3xl font-semibold tracking-tight text-foreground leading-[1.3] flex items-center gap-3">
+                  {project.name}
+                </h1>
+                <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground opacity-0 group-hover:opacity-100" onClick={() => setIsEditingTitle(true)}>
+                  <Pencil className="size-4" />
+                </Button>
+              </div>
+            )}
+          </div>
 
-          <p className="text-[15px] leading-relaxed text-muted-foreground mb-8 p-2 -mx-2 rounded-md hover:bg-muted/10 cursor-text transition-colors">
-            {project.description || "No description provided. Click to add one."}
-          </p>
+          <div className="mb-8">
+            {isEditingDescription ? (
+              <div className="space-y-3">
+                <AutoGrowTextarea
+                  value={descriptionDraft}
+                  onChange={(e) => setDescriptionDraft(e.target.value)}
+                  minHeight={120}
+                  className="w-full overflow-hidden bg-transparent px-2 py-2 text-[15px] leading-relaxed text-foreground outline-none ring-0 placeholder:text-muted-foreground/50"
+                  autoFocus
+                  placeholder="Add project description..."
+                />
+                <div className="flex items-center gap-2">
+                  <Button size="sm" onClick={handleSaveDescription}>Save</Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setIsEditingDescription(false); setDescriptionDraft(project.description || "") }}>Cancel</Button>
+                </div>
+              </div>
+            ) : (
+              <div className="group flex items-start gap-2">
+                <p className="flex-1 text-[15px] leading-relaxed text-muted-foreground p-2 -mx-2 rounded-md hover:bg-muted/10 cursor-text transition-colors">
+                  {project.description || "No description provided. Click the edit button to add one."}
+                </p>
+                <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground opacity-0 group-hover:opacity-100 mt-1" onClick={() => setIsEditingDescription(true)}>
+                  <Pencil className="size-4" />
+                </Button>
+              </div>
+            )}
+          </div>
 
-          <div className="flex items-center gap-2 mb-8">
-            <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:bg-muted/40"><Paperclip className="size-4" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">Add attachment</TooltipContent></Tooltip>
-            <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:bg-muted/40"><Link2 className="size-4" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">Add link</TooltipContent></Tooltip>
+          <input ref={fileInputRef} type="file" className="hidden" onChange={handleUploadFile} />
+
+          <div className="mb-10 rounded-2xl border border-border/70 bg-background/70 p-4">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-[14px] font-semibold text-foreground">Resources</h3>
+                <p className="mt-1 text-[12px] text-muted-foreground">Keep links and files attached without taking over the page.</p>
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                <span>{projectLinks?.length || 0} links</span>
+                <span className="text-border">•</span>
+                <span>{projectFiles?.length || 0} files</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-[1.2fr_0.8fr]">
+              <div className="rounded-xl border border-border/70 bg-muted/5 p-3">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Link2 className="size-3.5 text-muted-foreground" />
+                    <span className="text-[13px] font-medium text-foreground">Links</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => document.getElementById("project-link-url-input")?.focus()}
+                    className="text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    Add
+                  </button>
+                </div>
+
+                <div className="mb-3 flex flex-col gap-2 md:flex-row">
+                  <input
+                    value={linkLabel}
+                    onChange={(e) => setLinkLabel(e.target.value)}
+                    placeholder="Label"
+                    className="h-8 w-full rounded-lg border border-border/60 bg-background px-3 text-[12px] outline-none md:w-[150px]"
+                  />
+                  <input
+                    id="project-link-url-input"
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    placeholder="Paste a URL"
+                    className="h-8 flex-1 rounded-lg border border-border/60 bg-background px-3 text-[12px] outline-none"
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 rounded-lg border-border/60 px-3 text-[12px] shadow-none"
+                    onClick={handleAddLink}
+                    disabled={isAddingLink || !linkUrl.trim()}
+                  >
+                    {isAddingLink ? "Adding..." : "Save"}
+                  </Button>
+                </div>
+
+                <div className="space-y-1.5">
+                  {(projectLinks || []).length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border/70 px-3 py-3 text-[12px] text-muted-foreground">
+                      No links yet.
+                    </div>
+                  ) : (
+                    (projectLinks || []).map((link: any) => (
+                      <div key={link._id} className="flex items-center gap-3 rounded-lg border border-border/70 bg-background px-3 py-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[12.5px] font-medium text-foreground">{link.label || link.url}</div>
+                          <a href={link.url} target="_blank" rel="noreferrer" className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
+                            <ExternalLink className="size-3 shrink-0" />
+                            <span className="truncate">{link.url}</span>
+                          </a>
+                        </div>
+                        <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground" onClick={() => removeProjectLink({ linkId: link._id })}>
+                          <Trash2 className="size-3.5" />
+                        </Button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-border/70 bg-muted/5 p-3">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Paperclip className="size-3.5 text-muted-foreground" />
+                    <span className="text-[13px] font-medium text-foreground">Files</span>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 rounded-full px-2.5 text-[11px] text-muted-foreground hover:bg-muted/20"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isUploadingFile}
+                  >
+                    {isUploadingFile ? "Uploading..." : "Upload"}
+                  </Button>
+                </div>
+
+                <div className="space-y-1.5">
+                  {(projectFiles || []).length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-border/70 px-3 py-3 text-[12px] text-muted-foreground">
+                      No files yet.
+                    </div>
+                  ) : (
+                    (projectFiles || []).map((file: any) => (
+                      <div key={file._id} className="flex items-center gap-3 rounded-lg border border-border/70 bg-background px-3 py-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[12.5px] font-medium text-foreground">{file.fileName}</div>
+                          <div className="mt-0.5 text-[11px] text-muted-foreground">
+                            {file.size ? `${Math.max(1, Math.round(file.size / 1024))} KB` : "File"}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          {file.url && (
+                            <Button asChild variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground">
+                              <a href={file.url} target="_blank" rel="noreferrer">
+                                <ExternalLink className="size-3.5" />
+                              </a>
+                            </Button>
+                          )}
+                          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 text-muted-foreground" onClick={() => removeProjectFile({ fileId: file._id })}>
+                            <Trash2 className="size-3.5" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="py-2 mb-10"><Separator className="bg-border" /></div>
@@ -325,13 +679,31 @@ function OverviewTab({ project, activity, issues, prs }: { project: any; activit
 
           {/* Lead */}
           <EditablePropertyRow label="Lead" icon={User}>
-            <button className="flex items-center gap-1.5 text-foreground hover:bg-muted/40 px-2 py-0.5 rounded-md transition-colors -mx-2 cursor-pointer">
+            <div className="w-full space-y-2">
+              <div className="flex items-center gap-1.5 text-foreground px-2 py-0.5 -mx-2">
               {project.leadMember ? (
                 <><Avatar className="size-[18px] border bg-blue-100 text-blue-600"><AvatarFallback className="text-[8px] font-bold">{project.leadMember.displayName?.substring(0,2).toUpperCase() || "??"}</AvatarFallback></Avatar> {project.leadMember.displayName}</>
-              ) : (
-                <span className="text-muted-foreground">No lead</span>
-              )}
-            </button>
+                ) : (
+                  <span className="text-muted-foreground">No lead</span>
+                )}
+              </div>
+              <Select
+                value={selectedLeadId}
+                onValueChange={handleLeadChange}
+                disabled={isSavingLead || leadCandidates === undefined || leadCandidates.length === 0}
+              >
+                <SelectTrigger className="w-full rounded-md border-border/60 bg-background text-[12px]">
+                  <SelectValue placeholder={leadCandidates?.length ? "Select project lead" : "No eligible team members"} />
+                </SelectTrigger>
+                <SelectContent align="start">
+                  {(leadCandidates || []).map((member: any) => (
+                    <SelectItem key={member._id} value={member._id}>
+                      {member.displayName} {member.teams?.length ? `- ${member.teams.map((team: any) => team.identifier).join(", ")}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </EditablePropertyRow>
 
           {/* Issues / PRs */}
@@ -393,19 +765,40 @@ const boardColumns = [
   { id: "done", title: "Done", dot: "bg-emerald-500" },
 ]
 
-function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIssue: any }) {
+function BoardTab({
+  boardData,
+  updateIssue,
+  linkPullRequestToIssue,
+  projectId,
+}: {
+  boardData: { issues: any[]; standalonePullRequests: any[] } | undefined
+  updateIssue: any
+  linkPullRequestToIssue: any
+  projectId: Id<"projects">
+}) {
+  const router = useRouter()
   const [isBrowser, setIsBrowser] = React.useState(false)
+  const [optimisticIssues, setOptimisticIssues] = React.useState<any[] | null>(null)
+  const [isPersistingMove, setIsPersistingMove] = React.useState(false)
+  const [linkingPrId, setLinkingPrId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     setIsBrowser(true)
   }, [])
 
+  React.useEffect(() => {
+    if (boardData?.issues) {
+      setOptimisticIssues(boardData.issues)
+    }
+  }, [boardData?.issues])
+
   // Group issues by status
   const groupedIssues = React.useMemo(() => {
     const groups: Record<string, any[]> = {}
     for (const col of boardColumns) groups[col.id] = []
-    if (issues) {
-      for (const issue of issues) {
+    const sourceIssues = optimisticIssues || boardData?.issues || []
+    if (sourceIssues) {
+      for (const issue of sourceIssues) {
         const status = issue.status || "backlog"
         if (groups[status]) {
           groups[status].push(issue)
@@ -415,7 +808,9 @@ function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIs
       }
     }
     return groups
-  }, [issues])
+  }, [boardData, optimisticIssues])
+
+  const standalonePullRequests = boardData?.standalonePullRequests || []
 
   const onDragEnd = async (result: any) => {
     if (!result.destination) return
@@ -424,10 +819,39 @@ function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIs
 
     // Map column id to issue status
     const newStatus = destination.droppableId as "backlog" | "todo" | "in_progress" | "in_review" | "done"
+    const currentIssues = optimisticIssues || boardData?.issues || []
+    const movedIssue = currentIssues.find((issue: any) => issue._id === draggableId)
+    if (!movedIssue) return
+
+    setOptimisticIssues(
+      currentIssues.map((issue: any) =>
+        issue._id === draggableId ? { ...issue, status: newStatus } : issue
+      )
+    )
+    setIsPersistingMove(true)
+
     try {
       await updateIssue({ issueId: draggableId, status: newStatus })
+      toast.success(`Moved ${movedIssue.identifier} to ${boardColumns.find((column) => column.id === newStatus)?.title || "new column"}`)
     } catch (err) {
       console.error("Failed to update issue status:", err)
+      setOptimisticIssues(currentIssues)
+      toast.error(`Failed to move ${movedIssue.identifier}`)
+    } finally {
+      setIsPersistingMove(false)
+    }
+  }
+
+  const handleLinkPullRequestToIssue = async (prId: string, issueId: string, issueIdentifier: string) => {
+    setLinkingPrId(prId)
+    try {
+      await linkPullRequestToIssue({ prId, issueId })
+      toast.success(`Linked pull request to ${issueIdentifier}`)
+    } catch (err) {
+      console.error("Failed to link pull request:", err)
+      toast.error("Failed to link pull request")
+    } finally {
+      setLinkingPrId(null)
     }
   }
 
@@ -435,15 +859,121 @@ function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIs
     return <div className="flex-1 flex flex-col min-h-0 bg-background/50" />
   }
 
+  const renderDraggableCard = (item: any, provided: any, snapshot: any) => {
+    const card = (
+      <div
+        ref={provided.innerRef}
+        {...provided.draggableProps}
+        {...provided.dragHandleProps}
+        className={`bg-background rounded-[10px] p-4 select-none transition-[transform,box-shadow,border-color,opacity] duration-150 ease-out ${snapshot.isDragging ? 'border-2 border-[#5e6ad2] ring-8 ring-[#5e6ad2]/10 scale-[1.03] z-50 shadow-2xl rotate-[0.4deg]' : 'border border-border/60 hover:border-border hover:-translate-y-[1px] hover:shadow-lg'}`}
+        style={{
+          ...provided.draggableProps.style,
+          ...(snapshot.isDragging
+            ? {
+                transitionTimingFunction: "cubic-bezier(0.22, 1, 0.36, 1)",
+              }
+            : {}),
+        }}
+      >
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-3">
+          <span className="flex items-center gap-1.5 font-mono text-[10.5px]">
+            <CircleDot className="size-3 opacity-60" /> {item.identifier || `#${item.sequenceNumber}`}
+          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 text-muted-foreground/70 hover:text-foreground"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  router.push(`/dashboard/issues/${String(item.identifier || `#${item.sequenceNumber}`).replace("#", "")}`)
+                }}
+              >
+                <ExternalLink className="size-[13px]" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left" className="text-xs">Open issue</TooltipContent>
+          </Tooltip>
+        </div>
+
+        <p className="text-[13px] font-medium text-foreground leading-snug mb-4 whitespace-normal pr-1">
+          {item.title}
+        </p>
+
+        {item.linkedPullRequests?.length > 0 && (
+          <div className="mb-4 flex flex-col gap-2">
+            {item.linkedPullRequests.map((pr: any) => (
+              <div key={pr._id} className="bg-muted/20 border border-border/50 rounded-lg p-2.5 flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-foreground min-w-0">
+                    {pr.state === "merged" ? <GitMerge className="size-3.5 text-purple-500 shrink-0" /> : <GitPullRequest className="size-3.5 text-green-500 shrink-0" />}
+                    <span className="font-mono opacity-80 shrink-0">#{pr.githubPrNumber}</span>
+                    <span className="truncate text-muted-foreground">{pr.title}</span>
+                  </div>
+                  <span className="text-[9px] uppercase font-bold tracking-wider text-muted-foreground shrink-0">
+                    {pr.linkType}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
+                    {pr.checksStatus === "success" && <div className="flex gap-1 items-center bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><CheckCircle2 className="size-2.5" strokeWidth={3} /> Checks passed</div>}
+                    {pr.checksStatus === "failure" && <div className="flex gap-1 items-center bg-red-500/10 border border-red-500/20 text-red-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><AlertCircle className="size-2.5" strokeWidth={3} /> Checks failed</div>}
+                    {pr.checksStatus === "pending" && <div className="flex gap-1 items-center bg-amber-500/10 border border-amber-500/20 text-amber-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><RefreshCw className="size-2.5 animate-spin" strokeWidth={3} /> Pending</div>}
+                    {!pr.checksStatus && <div className="text-[9px] uppercase font-bold tracking-wider text-muted-foreground bg-muted/40 px-1.5 py-[2px] rounded-[4px]">No checks</div>}
+                    {pr.mergeable === false && <div className="bg-red-500/10 border border-red-500/20 text-red-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider">Conflicts</div>}
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] font-mono tracking-tight shrink-0">
+                    <span className="text-emerald-500 font-semibold bg-emerald-500/10 px-1 rounded">+{pr.additions}</span>
+                    <span className="text-red-500 font-semibold bg-red-500/10 px-1 rounded">-{pr.deletions}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between mt-auto pt-1">
+          <div>
+            {item.priority === "urgent" && <SignalHigh className="size-3.5 text-red-500" strokeWidth={2.5} />}
+            {item.priority === "high" && <SignalHigh className="size-3.5 text-orange-500" strokeWidth={2.5} />}
+            {item.priority === "medium" && <SignalHigh className="size-3.5 text-yellow-500" strokeWidth={2} />}
+            {item.priority === "low" && <SignalHigh className="size-3.5 text-blue-500" />}
+            {item.priority === "none" && <SignalHigh className="size-3.5 text-muted-foreground/40" />}
+          </div>
+          {item.assignee && (
+            <Avatar className="size-[22px] border-2 border-background ring-1 ring-border/20 z-10">
+              <AvatarFallback className="text-[8px] bg-blue-100 text-blue-600 font-bold">
+                {item.assignee.displayName?.substring(0, 2).toUpperCase() || "??"}
+              </AvatarFallback>
+            </Avatar>
+          )}
+        </div>
+      </div>
+    )
+
+    return snapshot.isDragging ? createPortal(card, document.body) : card
+  }
+
   return (
     <div className="flex-1 flex flex-col min-h-0 bg-background/50">
       <div className="h-16 border-b border-border/40 flex items-center justify-between px-8 shrink-0 bg-background">
-        <h2 className="text-[19px] font-semibold text-foreground tracking-tight">Progress Board</h2>
+        <div className="flex items-center gap-3">
+          <h2 className="text-[19px] font-semibold text-foreground tracking-tight">Progress Board</h2>
+          {isPersistingMove && (
+            <span className="text-[11px] font-medium text-muted-foreground flex items-center gap-1.5">
+              <RefreshCw className="size-3 animate-spin" /> Saving move
+            </span>
+          )}
+        </div>
         <div className="flex items-center gap-3">
           <Button variant="outline" size="sm" className="h-8 text-[13px] font-medium border-border/60 hover:bg-muted/30">Export</Button>
-          <Button size="sm" className="h-8 text-[13px] font-medium bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white gap-2">
-            <Plus className="size-3.5" /> Add task
-          </Button>
+          <CreateIssueDialog defaultProjectId={projectId}>
+            <Button size="sm" className="h-8 text-[13px] font-medium bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white gap-2">
+              <Plus className="size-3.5" /> Add issue
+            </Button>
+          </CreateIssueDialog>
         </div>
       </div>
 
@@ -452,19 +982,19 @@ function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIs
           {boardColumns.map((column) => {
             const items = groupedIssues[column.id] || []
             return (
-              <div key={column.id} className="flex-1 min-w-[280px] shrink-0 flex flex-col max-h-full bg-muted/30 rounded-xl overflow-hidden border border-border/40">
+              <div key={column.id} className="flex-1 min-w-[300px] shrink-0 flex flex-col max-h-full bg-muted/30 rounded-xl overflow-hidden border border-border/40">
                 <div className="flex items-center gap-2 p-4 shrink-0">
                   <div className={`size-2.5 rounded-full ${column.dot}`} />
                   <h3 className="text-[13px] font-bold text-foreground">{column.title}</h3>
                   <span className="text-[11px] text-muted-foreground font-medium ml-1">{items.length}</span>
                 </div>
-                
+
                 <Droppable droppableId={column.id}>
                   {(provided) => (
-                    <div 
-                      {...provided.droppableProps} 
+                    <div
+                      {...provided.droppableProps}
                       ref={provided.innerRef}
-                      className="flex-1 overflow-y-auto space-y-3 p-3 pt-0 [&::-webkit-scrollbar]:hidden flex flex-col"
+                      className="flex-1 overflow-y-auto space-y-3 p-3 pt-0 [&::-webkit-scrollbar]:hidden flex flex-col transition-colors duration-150"
                     >
                       {items.length === 0 && (
                         <div className="flex items-center justify-center py-8 text-[12px] text-muted-foreground/50">No issues</div>
@@ -472,63 +1002,7 @@ function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIs
                       {items.map((item: any, index: number) => (
                         <Draggable key={item._id} draggableId={item._id} index={index}>
                           {(provided, snapshot) => (
-                            <div
-                              ref={provided.innerRef}
-                              {...provided.draggableProps}
-                              {...provided.dragHandleProps}
-                              className={`bg-background rounded-[10px] p-4 transition-all ${snapshot.isDragging ? 'border-2 border-[#5e6ad2] ring-4 ring-[#5e6ad2]/10 scale-[1.02] z-50 shadow-none' : 'border border-border/60 hover:border-border'}`}
-                              style={{ ...provided.draggableProps.style }}
-                            >
-                              <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-3">
-                                <span className="flex items-center gap-1.5 font-mono text-[10.5px]">
-                                  <CircleDot className="size-3 opacity-60" /> {item.identifier || `#${item.sequenceNumber}`}
-                                </span>
-                                <MoreHorizontal className="size-[14px] opacity-60 hover:text-foreground cursor-pointer transition-colors" />
-                              </div>
-                              
-                              <p className="text-[13px] font-medium text-foreground leading-snug mb-4 whitespace-normal pr-1">
-                                {item.title}
-                              </p>
-
-                              {/* PR Health Card if linked */}
-                              {item.prHealth && (
-                                <div className="mb-4 bg-muted/20 border border-border/50 rounded-lg p-2.5 flex flex-col gap-2">
-                                  <div className="flex items-center justify-between">
-                                   <div className="flex items-center gap-1.5 text-[11.5px] font-medium text-foreground">
-                                     {item.prHealth.state === "merged" ? <GitMerge className="size-3.5 text-purple-500" /> : <GitPullRequest className="size-3.5 text-green-500" />}
-                                     <span className="font-mono opacity-80">#{item.prHealth.prNumber}</span>
-                                   </div>
-                                   <div className="flex items-center gap-1.5 text-[10px] font-mono tracking-tight">
-                                     <span className="text-emerald-500 font-semibold bg-emerald-500/10 px-1 rounded">+{item.prHealth.additions}</span>
-                                     <span className="text-red-500 font-semibold bg-red-500/10 px-1 rounded">-{item.prHealth.deletions}</span>
-                                   </div>
-                                  </div>
-                                  <div className="flex items-center gap-1.5">
-                                    {item.prHealth.checks === "success" && <div className="flex gap-1 items-center bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><CheckCircle2 className="size-2.5" strokeWidth={3} /> Checks passed</div>}
-                                    {item.prHealth.checks === "failure" && <div className="flex gap-1 items-center bg-red-500/10 border border-red-500/20 text-red-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><AlertCircle className="size-2.5" strokeWidth={3} /> Checks failed</div>}
-                                    {item.prHealth.checks === "pending" && <div className="flex gap-1 items-center bg-amber-500/10 border border-amber-500/20 text-amber-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><RefreshCw className="size-2.5 animate-spin" strokeWidth={3} /> Pending</div>}
-                                    {item.prHealth.mergeable === false && <div className="bg-red-500/10 border border-red-500/20 text-red-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider">Conflicts</div>}
-                                  </div>
-                                </div>
-                              )}
-
-                              <div className="flex items-center justify-between mt-auto pt-1">
-                                <div>
-                                  {item.priority === "urgent" && <SignalHigh className="size-3.5 text-red-500" strokeWidth={2.5} />}
-                                  {item.priority === "high" && <SignalHigh className="size-3.5 text-orange-500" strokeWidth={2.5} />}
-                                  {item.priority === "medium" && <SignalHigh className="size-3.5 text-yellow-500" strokeWidth={2} />}
-                                  {item.priority === "low" && <SignalHigh className="size-3.5 text-blue-500" />}
-                                  {item.priority === "none" && <SignalHigh className="size-3.5 text-muted-foreground/40" />}
-                                </div>
-                                {item.assignee && (
-                                  <Avatar className="size-[22px] border-2 border-background ring-1 ring-border/20 z-10">
-                                    <AvatarFallback className="text-[8px] bg-blue-100 text-blue-600 font-bold">
-                                      {item.assignee.displayName?.substring(0, 2).toUpperCase() || "??"}
-                                    </AvatarFallback>
-                                  </Avatar>
-                                )}
-                              </div>
-                            </div>
+                            renderDraggableCard(item, provided, snapshot)
                           )}
                         </Draggable>
                       ))}
@@ -540,6 +1014,75 @@ function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIs
             )
           })}
         </DragDropContext>
+
+        <div className="w-[320px] shrink-0 flex flex-col max-h-full bg-muted/20 rounded-xl overflow-hidden border border-border/40">
+          <div className="flex items-center gap-2 p-4 shrink-0 border-b border-border/30">
+            <GitPullRequest className="size-4 text-emerald-500" />
+            <h3 className="text-[13px] font-bold text-foreground">Standalone PRs</h3>
+            <span className="text-[11px] text-muted-foreground font-medium ml-1">{standalonePullRequests.length}</span>
+          </div>
+          <div className="flex-1 overflow-y-auto p-3 space-y-3 [&::-webkit-scrollbar]:hidden">
+            {standalonePullRequests.length === 0 ? (
+              <div className="flex items-center justify-center py-8 text-[12px] text-muted-foreground/50">No standalone PRs</div>
+            ) : (
+              standalonePullRequests.map((pr: any) => (
+                <div key={pr._id} className="bg-background rounded-[10px] p-4 border border-border/60">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-3 gap-2">
+                    <span className="font-mono text-[10.5px] truncate">{pr.githubRepoFullName}#{pr.githubPrNumber}</span>
+                    <span className={`text-[9px] uppercase font-bold tracking-wider ${
+                      pr.state === "merged" ? "text-purple-500" : pr.state === "closed" ? "text-red-500" : pr.isDraft ? "text-muted-foreground" : "text-green-500"
+                    }`}>
+                      {pr.state === "open" && pr.isDraft ? "draft" : pr.state}
+                    </span>
+                  </div>
+                  <p className="text-[13px] font-medium text-foreground leading-snug mb-3">{pr.title}</p>
+                  <div className="flex items-center gap-2 flex-wrap mb-3">
+                    {pr.checksStatus === "success" && <div className="flex gap-1 items-center bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><CheckCircle2 className="size-2.5" strokeWidth={3} /> Checks passed</div>}
+                    {pr.checksStatus === "failure" && <div className="flex gap-1 items-center bg-red-500/10 border border-red-500/20 text-red-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><AlertCircle className="size-2.5" strokeWidth={3} /> Checks failed</div>}
+                    {pr.checksStatus === "pending" && <div className="flex gap-1 items-center bg-amber-500/10 border border-amber-500/20 text-amber-600 px-1.5 py-[2px] rounded-[4px] text-[9px] uppercase font-bold tracking-wider"><RefreshCw className="size-2.5 animate-spin" strokeWidth={3} /> Pending</div>}
+                    {pr.linkedIssues?.length > 0 && pr.linkedIssues.map((issue: any) => (
+                      <span key={issue._id} className="text-[10px] font-mono bg-muted/40 border border-border/40 text-muted-foreground px-1.5 py-[2px] rounded">
+                        {issue.linkType}: {issue.identifier}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="mb-3">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="outline" size="sm" disabled={!!linkingPrId && linkingPrId === pr._id} className="h-7 text-[11px] font-medium border-border/60">
+                          <Link2 className="size-3.5" /> {linkingPrId === pr._id ? "Linking..." : "Link issue"}
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-[240px] max-h-[280px] overflow-y-auto">
+                        {boardData?.issues?.length ? (
+                          boardData.issues.map((issue: any) => (
+                            <DropdownMenuItem
+                              key={issue._id}
+                              onClick={() => handleLinkPullRequestToIssue(pr._id, issue._id, issue.identifier)}
+                              className="py-2 px-2 flex flex-col items-start gap-0.5"
+                            >
+                              <span className="text-[11px] font-mono text-muted-foreground">{issue.identifier}</span>
+                              <span className="text-[12px] text-foreground leading-snug">{issue.title}</span>
+                            </DropdownMenuItem>
+                          ))
+                        ) : (
+                          <div className="px-3 py-2 text-[12px] text-muted-foreground">Create an issue first</div>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-muted-foreground">
+                    <span className="font-mono">{pr.githubRepoFullName}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-emerald-500 font-semibold bg-emerald-500/10 px-1 rounded">+{pr.additions ?? 0}</span>
+                      <span className="text-red-500 font-semibold bg-red-500/10 px-1 rounded">-{pr.deletions ?? 0}</span>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -548,11 +1091,75 @@ function BoardTab({ issues, updateIssue }: { issues: any[] | undefined; updateIs
 // ───────────────────────────────────────────────────────────────────────────
 // DASHBOARD, TIMELINE, CALENDAR placeholders
 // ───────────────────────────────────────────────────────────────────────────
-function DashboardTab({ stats, prs }: { stats: any; prs: any[] | undefined }) {
+function DashboardTab({
+  project,
+  organization,
+  dashboardData,
+  syncPullRequest,
+  syncCommit,
+}: {
+  project: any;
+  organization: any;
+  dashboardData: any;
+  syncPullRequest: any;
+  syncCommit: any;
+}) {
+  const [isSyncing, setIsSyncing] = React.useState(false)
+  const stats = dashboardData?.stats
+  const prs = dashboardData?.pullRequests || []
   const avgMergeDays = stats ? Math.round((stats.avgMergeTimeHours / 24) * 10) / 10 : 0
   const ciRate = stats?.ciSuccessRate ?? 100
   const blocked = stats?.blockedTasks ?? 0
-  const failedPRs = prs?.filter((p: any) => p.checksStatus === "failure" && p.state === "open") || []
+  const failedPRs = prs.filter((p: any) => p.checksStatus === "failure" && p.state === "open")
+
+  const handleSyncGitHubData = async () => {
+    const repos = project.githubRepoFullNames || []
+    if (!organization?.githubInstallationId || repos.length === 0 || isSyncing) {
+      return
+    }
+
+    setIsSyncing(true)
+    try {
+      const prResults = await Promise.allSettled(
+        repos.map(async (repo: string) => {
+          const repoPrs = await fetchRepoPullRequests(organization.githubInstallationId, repo)
+          await Promise.allSettled(
+            repoPrs.map((pr: any) =>
+              syncPullRequest({ orgId: organization._id, ...pr })
+            )
+          )
+          return repoPrs.length
+        })
+      )
+
+      const commitResults = await Promise.allSettled(
+        repos.map(async (repo: string) => {
+          const repoCommits = await fetchRepoCommits(organization.githubInstallationId, repo, 20)
+          await Promise.allSettled(
+            repoCommits.map((commit: any) =>
+              syncCommit({ orgId: organization._id, ...commit })
+            )
+          )
+          return repoCommits.length
+        })
+      )
+
+      const prCount = prResults.reduce(
+        (total, result) => total + (result.status === "fulfilled" ? result.value : 0),
+        0
+      )
+      const commitCount = commitResults.reduce(
+        (total, result) => total + (result.status === "fulfilled" ? result.value : 0),
+        0
+      )
+
+      toast.success(`Synced ${prCount} pull requests and ${commitCount} commits`)
+    } catch {
+      toast.error("Failed to sync GitHub data for this project")
+    } finally {
+      setIsSyncing(false)
+    }
+  }
 
   return (
     <div className="flex-1 overflow-y-auto px-12 py-12 bg-background [&::-webkit-scrollbar]:hidden">
@@ -563,8 +1170,14 @@ function DashboardTab({ stats, prs }: { stats: any; prs: any[] | undefined }) {
             <h2 className="text-[22px] font-semibold text-foreground tracking-tight mb-2">Delivery Analytics</h2>
             <p className="text-[13.5px] text-muted-foreground font-medium">Tracking PR lifecycles, velocity bottlenecks, and CI/CD delays across the project.</p>
           </div>
-          <Button variant="secondary" size="sm" className="h-8 bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white font-medium rounded-[6px] shadow-none gap-2">
-            <RefreshCw className="size-3.5" /> Sync GitHub Data
+          <Button
+            variant="secondary"
+            size="sm"
+            className="h-8 bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white font-medium rounded-[6px] shadow-none gap-2"
+            onClick={handleSyncGitHubData}
+            disabled={isSyncing || !organization?.githubInstallationId || (project.githubRepoFullNames || []).length === 0}
+          >
+            <RefreshCw className={`size-3.5 ${isSyncing ? "animate-spin" : ""}`} /> {isSyncing ? "Syncing..." : "Sync GitHub Data"}
           </Button>
         </div>
 
@@ -906,5 +1519,3 @@ function TraceabilityTab({ issues, prs, activity }: { issues: any[] | undefined;
     </div>
   )
 }
-
-

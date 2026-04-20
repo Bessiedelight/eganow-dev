@@ -24,8 +24,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { AutoGrowTextarea } from "@/components/auto-grow-textarea"
+import { IssueAiChatTab } from "@/components/issue-ai-chat-tab"
 import {
-  MoreHorizontal, ListFilter, SlidersHorizontal, AlertCircle, ChevronRight, CheckCircle2, CircleDashed, SignalHigh, SignalMedium, SignalLow, Plus, Calendar, MessageSquare, Zap, Bug, Users, Bookmark, CircleDot, GitPullRequest, GitMerge, XCircle, Milestone, Activity, Link2, GitBranch, ChevronDown, Check, Star, Copy, X, Loader2, Bold, Italic, Link as LinkIcon, List, Eye, Edit2, History, MessageCircle, Paperclip, Circle, PlayCircle, FolderKanban, User, Tag
+  MoreHorizontal, ListFilter, SlidersHorizontal, AlertCircle, ChevronRight, CheckCircle2, CircleDashed, SignalHigh, SignalMedium, SignalLow, Plus, Calendar, MessageSquare, Zap, Bug, Users, Bookmark, CircleDot, GitPullRequest, GitMerge, XCircle, Milestone, Activity, Link2, GitBranch, ChevronDown, Check, Star, Copy, X, Loader2, Bold, Italic, Link as LinkIcon, List, Eye, Edit2, History, MessageCircle, Paperclip, Circle, PlayCircle, FolderKanban, User, Tag, Bot
 } from "lucide-react"
 
 import ReactMarkdown from 'react-markdown'
@@ -70,6 +72,11 @@ function timeAgo(ts: number) {
   return `${Math.floor(h / 24)}d ago`
 }
 
+function humanizeChangeValue(value: string | null | undefined) {
+  if (!value) return "?"
+  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
 // ─── Editable Property Row ────────────────────────────────────
 function EditablePropertyRow({ label, icon: Icon, children }: {
   label: string; icon: any; children: React.ReactNode
@@ -90,6 +97,8 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
   const resolvedParams = React.use(params)
   const router = useRouter()
   const { organization } = useOrganization()
+  const [activeView, setActiveView] = React.useState<"details" | "ai-chat">("details")
+  const [issueChatInput, setIssueChatInput] = React.useState("")
   const [commentText, setCommentText] = React.useState("")
   const [editingTitle, setEditingTitle] = React.useState(false)
   const [titleDraft, setTitleDraft] = React.useState("")
@@ -101,8 +110,7 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
     api.issues.getByIdentifier,
     organization ? { orgId: organization._id, identifier: resolvedParams.issueId } : "skip"
   )
-  const comments = useQuery(api.comments.listByIssue, issue ? { issueId: issue._id } : "skip")
-  const activityEvents = useQuery(api.activityEvents.listByIssue, issue ? { issueId: issue._id } : "skip")
+  const issueThread = useQuery(api.activityEvents.getIssueThread, issue ? { issueId: issue._id } : "skip")
   const members = useQuery(api.members.listByOrg, organization ? { orgId: organization._id } : "skip")
   const teams = useQuery(api.teams.listByOrg, organization ? { orgId: organization._id } : "skip")
   const projects = useQuery(api.projects.listByOrg, organization ? { orgId: organization._id } : "skip")
@@ -111,6 +119,7 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
   const updateIssue = useMutation(api.issues.update)
   const createComment = useMutation(api.comments.create)
   const linkCommentToGH = useMutation(api.comments.linkToGitHub)
+  const markIssueThreadSeen = useMutation(api.activityEvents.markIssueThreadSeen)
 
   // ─── Update helpers ───────────────────────────────────────
   const handleUpdate = async (field: string, value: any, toastMsg?: string) => {
@@ -190,6 +199,19 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
     await handleUpdate("labelIds", newIds)
   }
 
+  React.useEffect(() => {
+    if (!issue || !issueThread?.latestTimestamp) return
+    void markIssueThreadSeen({
+      issueId: issue._id,
+      lastSeenActivityAt: issueThread.latestTimestamp,
+    })
+  }, [issue, issueThread?.latestTimestamp, markIssueThreadSeen])
+
+  const threadItems = React.useMemo(
+    () => [...(issueThread?.items || [])].sort((a: any, b: any) => b.createdAt - a.createdAt),
+    [issueThread?.items]
+  )
+
   // ─── Loading / Not Found ──────────────────────────────────
   if (issue === undefined) {
     return (
@@ -217,12 +239,6 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
   const StatusIcon = sc.icon
   const displayId = issue.identifier.startsWith("#") ? issue.identifier : `#${issue.sequenceNumber}`
 
-  // Unified timeline
-  const timeline = [
-    ...(activityEvents || []).map((e: any) => ({ type: "event" as const, createdAt: e.createdAt, data: e })),
-    ...(comments || []).map((c: any) => ({ type: "comment" as const, createdAt: c.createdAt, data: c })),
-  ].sort((a, b) => a.createdAt - b.createdAt)
-
   return (
     <SidebarProvider>
       <AppSidebar />
@@ -242,6 +258,19 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
               <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground"><MoreHorizontal className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">More actions</TooltipContent></Tooltip>
             </div>
             <div className="flex items-center gap-1">
+              <Button
+                variant={activeView === "ai-chat" ? "secondary" : "outline"}
+                size="sm"
+                className={`mr-1 h-7 rounded-full px-3 text-[12px] shadow-none ${
+                  activeView === "ai-chat"
+                    ? "bg-foreground text-background hover:bg-foreground/90 border-foreground"
+                    : "border-border/60 text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => setActiveView((current) => (current === "ai-chat" ? "details" : "ai-chat"))}
+              >
+                <Bot className="size-3.5" />
+                Codex Agent
+              </Button>
               <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 rounded-full text-muted-foreground border-border/60"><Link2 className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">Copy link</TooltipContent></Tooltip>
               <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 rounded-full text-muted-foreground border-border/60"><Copy className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">Copy ID</TooltipContent></Tooltip>
               <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 rounded-full text-blue-500 border-border/60 bg-blue-500/5"><GitBranch className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">Create branch</TooltipContent></Tooltip>
@@ -253,7 +282,17 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
           <div className="flex-1 flex min-h-0 overflow-hidden">
 
             {/* LEFT: Issue Body */}
-            <div className="flex-1 overflow-y-auto [&::-webkit-scrollbar]:hidden bg-background">
+            <div className="flex-1 min-h-0 flex flex-col bg-background">
+              {activeView === "ai-chat" ? (
+                <IssueAiChatTab
+                  issueTitle={issue.title}
+                  issueIdentifier={displayId}
+                  chatInput={issueChatInput}
+                  setChatInput={setIssueChatInput}
+                />
+              ) : (
+                <>
+              <div className="flex-1 overflow-y-auto [&::-webkit-scrollbar]:hidden">
               <div className="max-w-[780px] mx-auto w-full px-16 py-12">
 
                 {/* Status badge + meta */}
@@ -292,12 +331,14 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
 
                 {/* Editable Description */}
                 {editingBody ? (
-                  <textarea
+                  <AutoGrowTextarea
                     autoFocus
                     value={bodyDraft}
                     onChange={e => setBodyDraft(e.target.value)}
                     onBlur={handleBodySave}
-                    className="w-full text-[15px] leading-relaxed text-foreground mb-8 p-3 rounded-md border border-blue-500/30 bg-background outline-none resize-none min-h-[120px]"
+                    minHeight={120}
+                    className="mb-8 w-full overflow-hidden border-none bg-transparent px-2 py-2 text-[15px] leading-relaxed text-foreground outline-none ring-0 placeholder:text-muted-foreground/50"
+                    placeholder="Add description..."
                   />
                 ) : (
                   <div 
@@ -324,58 +365,202 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
                 </Button>
                 <div className="py-12 mt-4"><Separator className="bg-border/60" /></div>
 
-                {/* Activity Feed */}
+                {/* Issue Thread */}
                 <div className="mt-4">
-                  <h3 className="font-semibold text-[14px] text-foreground flex items-center justify-between mb-8">Activity Feed</h3>
+                  <div className="flex items-start justify-between mb-8">
+                    <div>
+                      <h3 className="font-semibold text-[14px] text-foreground">Issue Thread</h3>
+                      <p className="text-[12px] text-muted-foreground mt-1">
+                        Comments, progress updates, and linked pull request changes in one timeline.
+                      </p>
+                    </div>
+                  </div>
 
-                  {timeline.map((item, idx) => {
-                    if (item.type === "event") {
-                      const evt = item.data
-                      if (evt.eventType === "comment_created") return null
-                      let text = evt.eventType.replace(/_/g, " ")
-                      let iconBg = "bg-muted/40 border-border/40 text-muted-foreground"
-                      let EvtIcon = Activity
-                      if (evt.eventType === "issue_created") { text = "created the issue"; iconBg = "bg-green-500/10 border-green-500/20 text-green-600"; EvtIcon = CircleDot }
-                      else if (evt.eventType === "issue_status_changed") {
-                        const m = evt.metadata as any; text = `changed status from ${m?.from || "?"} to ${m?.to || "?"}`
-                      }
-                      return (
-                        <div key={`e-${idx}`} className="flex items-start gap-3 mb-6 px-2">
-                          <div className={`size-6 shrink-0 rounded-full flex items-center justify-center border mt-0.5 ${iconBg}`}><EvtIcon className="size-3" strokeWidth={2.5} /></div>
-                          <div className="text-[13px] text-muted-foreground leading-relaxed pt-1">
-                            <span className="font-semibold text-foreground">{evt.actorDisplayName}</span> {text}
-                            <div className="text-[11.5px] mt-1 text-muted-foreground/60">{timeAgo(evt.createdAt)}</div>
-                          </div>
-                        </div>
-                      )
-                    }
-                    if (item.type === "comment") {
-                      const c = item.data
-                      return (
-                        <div key={`c-${idx}`} className="bg-background border border-border/40 rounded-xl mb-6 overflow-hidden">
-                          <div className="p-4 py-3 pb-2 border-b border-border/20 bg-muted/5 flex items-center justify-between">
-                            <div className="flex items-center gap-2.5">
-                              <Avatar className="size-6 border bg-blue-100 dark:bg-blue-900/30 text-blue-600"><AvatarFallback className="text-[9px] font-bold">{getInitials(c.authorDisplayName)}</AvatarFallback></Avatar>
-                              <div className="text-[13px] text-muted-foreground">
-                                <span className="font-semibold text-foreground">{c.authorDisplayName}</span> commented <span className="mx-1.5 text-muted-foreground/60">{timeAgo(c.createdAt)}</span>
-                                {c.githubCommentId && <span className="text-[10px] bg-muted/40 px-1.5 py-0.5 rounded-full ml-1 text-muted-foreground">synced</span>}
+                  {threadItems.length === 0 ? (
+                    <div className="rounded-2xl border border-dashed border-border/60 bg-muted/10 px-6 py-10 text-center">
+                      <History className="size-6 text-muted-foreground/40 mx-auto mb-3" />
+                      <p className="text-[13px] font-medium text-foreground">No thread activity yet</p>
+                      <p className="text-[12px] text-muted-foreground mt-1">
+                        New comments and issue updates will appear here as work moves forward.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="relative pl-6 border-l border-border/60 space-y-8">
+                      {threadItems.map((item: any, idx: number) => {
+                        if (item.type === "event") {
+                          const evt = item
+                          const metadata = (evt.metadata || {}) as any
+                          let title = "Activity updated"
+                          let detail = ""
+                          let fromLabel: string | null = null
+                          let toLabel: string | null = null
+                          let iconTone = "border-border/70 text-muted-foreground bg-background"
+                          let cardTone = "border-border/50 bg-background"
+                          let EvtIcon = Activity
+
+                          if (evt.eventType === "issue_created") {
+                            title = "Issue created"
+                            detail = "This issue was created and added to the workflow."
+                            iconTone = "border-green-500/30 text-green-600 bg-green-500/10"
+                            cardTone = "border-green-500/20 bg-green-500/[0.03]"
+                            EvtIcon = CircleDot
+                          } else if (evt.eventType === "issue_status_changed") {
+                            fromLabel = metadata.oldLabel || humanizeChangeValue(metadata.from || metadata.oldValue)
+                            toLabel = metadata.newLabel || humanizeChangeValue(metadata.to || metadata.newValue)
+                            title = "Status updated"
+                            detail = "The issue moved to a new workflow stage."
+                            iconTone = "border-amber-500/30 text-amber-600 bg-amber-500/10"
+                            cardTone = "border-amber-500/20 bg-amber-500/[0.04]"
+                            EvtIcon = CircleDot
+                          } else if (evt.eventType === "issue_assignee_changed") {
+                            fromLabel = metadata.oldLabel || humanizeChangeValue(metadata.from || metadata.oldValue) || "Unassigned"
+                            toLabel = metadata.newLabel || humanizeChangeValue(metadata.to || metadata.newValue) || "Unassigned"
+                            title = "Assignee updated"
+                            detail = "Ownership of this issue changed."
+                            iconTone = "border-blue-500/30 text-blue-600 bg-blue-500/10"
+                            cardTone = "border-blue-500/20 bg-blue-500/[0.04]"
+                            EvtIcon = User
+                          } else if (evt.eventType === "issue_priority_changed") {
+                            fromLabel = metadata.oldLabel || humanizeChangeValue(metadata.from || metadata.oldValue)
+                            toLabel = metadata.newLabel || humanizeChangeValue(metadata.to || metadata.newValue)
+                            title = "Priority updated"
+                            detail = "The urgency level for this issue changed."
+                            iconTone = "border-orange-500/30 text-orange-600 bg-orange-500/10"
+                            cardTone = "border-orange-500/20 bg-orange-500/[0.04]"
+                            EvtIcon = SignalHigh
+                          } else if (evt.eventType === "pull_request_linked_to_issue") {
+                            title = "Pull request linked"
+                            detail = `${evt.pullRequest?.identifier || "A pull request"} is now connected to this issue.`
+                            iconTone = "border-emerald-500/30 text-emerald-600 bg-emerald-500/10"
+                            cardTone = "border-emerald-500/20 bg-emerald-500/[0.04]"
+                            EvtIcon = Link2
+                          } else if (evt.eventType === "pull_request_state_changed") {
+                            fromLabel = metadata.oldLabel || humanizeChangeValue(metadata.oldValue)
+                            toLabel = metadata.newLabel || humanizeChangeValue(metadata.newValue)
+                            title = `${evt.pullRequest?.identifier || "Pull request"} state updated`
+                            detail = "The linked pull request changed lifecycle state."
+                            iconTone = "border-violet-500/30 text-violet-600 bg-violet-500/10"
+                            cardTone = "border-violet-500/20 bg-violet-500/[0.04]"
+                            EvtIcon = metadata?.newValue === "merged" ? GitMerge : GitPullRequest
+                          } else if (evt.eventType === "pull_request_checks_changed") {
+                            fromLabel = metadata.oldLabel || humanizeChangeValue(metadata.oldValue)
+                            toLabel = metadata.newLabel || humanizeChangeValue(metadata.newValue)
+                            title = `${evt.pullRequest?.identifier || "Pull request"} checks updated`
+                            detail = "CI and verification status changed for linked work."
+                            iconTone = "border-red-500/30 text-red-600 bg-red-500/10"
+                            cardTone = "border-red-500/20 bg-red-500/[0.04]"
+                            EvtIcon = AlertCircle
+                          } else if (evt.eventType === "pull_request_review_requested") {
+                            toLabel = metadata.newLabel || "Reviewer"
+                            title = `${evt.pullRequest?.identifier || "Pull request"} requested review`
+                            detail = "A reviewer was requested on the linked pull request."
+                            iconTone = "border-sky-500/30 text-sky-600 bg-sky-500/10"
+                            cardTone = "border-sky-500/20 bg-sky-500/[0.04]"
+                            EvtIcon = GitPullRequest
+                          } else {
+                            detail = evt.eventType.replace(/_/g, " ")
+                          }
+
+                          return (
+                            <div key={`e-${idx}`} className="relative">
+                              <div className={`absolute -left-[29px] top-1 rounded-full border p-1 z-10 ${iconTone}`}>
+                                <EvtIcon className="size-3.5" strokeWidth={2.3} />
+                              </div>
+                              <div className="text-[12px] text-muted-foreground mb-3 font-medium">
+                                <span className="text-foreground font-semibold">{evt.actorDisplayName}</span>
+                                <span className="mx-2 text-muted-foreground/40">•</span>
+                                {timeAgo(evt.createdAt)}
+                              </div>
+                              <div className={`rounded-2xl border p-4 shadow-none ${cardTone}`}>
+                                <div className="flex items-start justify-between gap-3">
+                                  <div>
+                                    <h4 className="text-[13.5px] font-semibold text-foreground">{title}</h4>
+                                    <p className="text-[12.5px] text-muted-foreground mt-1 leading-relaxed">{detail}</p>
+                                  </div>
+                                  {evt.pullRequest?.identifier && (
+                                    <span className="shrink-0 rounded-full border border-border/50 bg-background/80 px-2 py-1 text-[10px] font-semibold text-muted-foreground">
+                                      {evt.pullRequest.identifier}
+                                    </span>
+                                  )}
+                                </div>
+                                {(fromLabel || toLabel) && (
+                                  <div className="mt-4 flex flex-wrap items-center gap-2">
+                                    {fromLabel && (
+                                      <span className="rounded-full border border-border/50 bg-background px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+                                        {fromLabel}
+                                      </span>
+                                    )}
+                                    {fromLabel && toLabel && (
+                                      <span className="text-[11px] font-semibold text-muted-foreground/60">→</span>
+                                    )}
+                                    {toLabel && (
+                                      <span className="rounded-full border border-foreground/10 bg-foreground/[0.03] px-2.5 py-1 text-[11px] font-semibold text-foreground">
+                                        {toLabel}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             </div>
-                            <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground/60 rounded-full"><MoreHorizontal className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="left" className="text-xs">Comment actions</TooltipContent></Tooltip>
-                          </div>
-                          <div className="p-4 py-3"><p className="text-[14px] text-foreground leading-relaxed whitespace-pre-wrap">{c.body}</p></div>
-                        </div>
-                      )
-                    }
-                    return null
-                  })}
+                          )
+                        }
 
-                  {/* Comment Input */}
-                  <div className="bg-muted/20 border border-border/60 rounded-xl overflow-hidden flex flex-col min-h-[90px] hover:bg-muted/30 mt-4 transition-colors">
-                    <div className="p-4 px-5 flex-1">
-                      <textarea value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="Add a comment..." className="w-full h-full bg-transparent resize-none border-none outline-none text-[14px] text-foreground placeholder:text-muted-foreground font-medium min-h-[40px]" />
+                        if (item.type === "comment") {
+                          const c = item
+                          return (
+                            <div key={`c-${idx}`} className="relative">
+                              <div className="absolute -left-[29px] top-1 rounded-full border border-blue-500/20 bg-blue-500/10 p-1 z-10 text-blue-600">
+                                <MessageSquare className="size-3.5" strokeWidth={2.3} />
+                              </div>
+                              <div className="text-[12px] text-muted-foreground mb-3 font-medium">
+                                <span className="text-foreground font-semibold">{c.authorDisplayName}</span>
+                                <span className="mx-2 text-muted-foreground/40">•</span>
+                                commented {timeAgo(c.createdAt)}
+                                {c.githubCommentId && (
+                                  <span className="ml-2 rounded-full border border-border/50 bg-muted/30 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                    Synced
+                                  </span>
+                                )}
+                              </div>
+                              <div className="rounded-2xl border border-border/50 bg-background overflow-hidden">
+                                <div className="px-4 py-3 border-b border-border/20 bg-muted/[0.04] flex items-center justify-between">
+                                  <div className="flex items-center gap-2.5">
+                                    <Avatar className="size-7 border bg-blue-100 dark:bg-blue-900/30 text-blue-600">
+                                      <AvatarFallback className="text-[9px] font-bold">
+                                        {getInitials(c.authorDisplayName)}
+                                      </AvatarFallback>
+                                    </Avatar>
+                                    <div className="text-[12.5px] text-muted-foreground">
+                                      <span className="font-semibold text-foreground">{c.authorDisplayName}</span>
+                                      <span className="mx-1.5 text-muted-foreground/50">•</span>
+                                      {timeAgo(c.createdAt)}
+                                    </div>
+                                  </div>
+                                  <Tooltip><TooltipTrigger asChild><Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground/60 rounded-full"><MoreHorizontal className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="left" className="text-xs">Comment actions</TooltipContent></Tooltip>
+                                </div>
+                                <div className="p-4">
+                                  <p className="text-[14px] text-foreground leading-relaxed whitespace-pre-wrap">{c.body}</p>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        }
+
+                        return null
+                      })}
                     </div>
-                    <div className="px-4 py-2 bg-muted/10 flex items-center justify-end gap-1 border-t border-border/10">
+                  )}
+
+                </div>
+              </div>
+              </div>
+              <div className="shrink-0">
+                <div className="max-w-[780px] mx-auto w-full px-16 pb-4">
+                  <div className="rounded-2xl border border-border/60 bg-background overflow-hidden shadow-none transition-colors focus-within:border-[#5e6ad2]/40">
+                    <div className="px-4 py-3">
+                      <textarea value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="Add a comment..." className="w-full bg-transparent resize-none border-none outline-none text-[13.5px] text-foreground placeholder:text-muted-foreground font-medium min-h-[48px]" />
+                    </div>
+                    <div className="px-4 py-2.5 flex items-center justify-end gap-1 border-t border-border/10">
                       <Button variant="ghost" size="sm" className="h-7 text-muted-foreground gap-1.5 hover:bg-transparent" onClick={() => handleStatusChange("cancelled")}><AlertCircle className="size-3.5" /> Close as not planned</Button>
                       <Button variant="secondary" size="sm" disabled={!commentText.trim() || isCommenting} onClick={handleSubmitComment} className="h-7 bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white font-medium ml-2 rounded-[6px]">
                         {isCommenting ? "Posting..." : "Comment"}
@@ -384,6 +569,8 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
                   </div>
                 </div>
               </div>
+                </>
+              )}
             </div>
 
             {/* RIGHT: Properties Sidebar */}
@@ -540,15 +727,38 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
                   <Separator className="bg-border/60" />
                   <div className="flex flex-col gap-2">
                     <span className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider px-1">Linked Pull Requests</span>
-                    {issue.linkedPRs.map((pr: any, i: number) => (
-                      <a key={i} href={pr.githubUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2.5 px-3 py-2 rounded-lg border border-border/40 hover:bg-muted/30 transition-colors cursor-pointer group">
-                        <GitPullRequest className={`size-4 shrink-0 ${pr.state === "merged" ? "text-purple-500" : pr.state === "open" ? "text-green-500" : "text-red-500"}`} />
-                        <div className="flex flex-col min-w-0">
-                          <span className="text-[12px] font-medium text-foreground truncate group-hover:underline">#{pr.githubPrNumber} {pr.title}</span>
-                          <span className="text-[11px] text-muted-foreground capitalize">{pr.state}</span>
+                    {issue.linkedPRs.map((pr: any, i: number) => {
+                      const prState =
+                        pr.state === "merged"
+                          ? { icon: GitMerge, color: "text-purple-500", bg: "bg-purple-500/10" }
+                          : pr.state === "closed"
+                            ? { icon: XCircle, color: "text-red-500", bg: "bg-red-500/10" }
+                            : { icon: GitPullRequest, color: "text-green-500", bg: "bg-green-500/10" }
+                      const PrIcon = prState.icon
+                      const prIdentifier = `${pr.githubRepoFullName || issue.githubRepoFullName || "repo"}#${pr.githubPrNumber}`
+
+                      return (
+                        <div
+                          key={i}
+                          onClick={() => router.push(`/dashboard/pulls/${encodeURIComponent(prIdentifier)}`)}
+                          className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/40 hover:bg-muted/20 hover:border-border/60 transition-all cursor-pointer group"
+                        >
+                          <PrIcon className={`size-4 shrink-0 ${prState.color}`} strokeWidth={2.5} />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] font-mono text-muted-foreground/60 shrink-0">#{pr.githubPrNumber}</span>
+                              <span className="text-[13px] font-medium text-foreground truncate group-hover:underline">{pr.title}</span>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${prState.bg} ${prState.color} capitalize`}>
+                              {pr.state}
+                            </span>
+                          </div>
+                          <ChevronRight className="size-3.5 text-muted-foreground/30 group-hover:text-muted-foreground transition-colors" />
                         </div>
-                      </a>
-                    ))}
+                      )
+                    })}
                   </div>
                 </>
               )}

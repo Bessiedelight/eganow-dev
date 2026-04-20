@@ -4,6 +4,19 @@ import { v } from "convex/values";
 
 export default defineSchema({
   ...authTables,
+  users: defineTable({
+    name: v.optional(v.string()),
+    image: v.optional(v.string()),
+    email: v.optional(v.string()),
+    emailVerificationTime: v.optional(v.number()),
+    phone: v.optional(v.string()),
+    phoneVerificationTime: v.optional(v.number()),
+    isAnonymous: v.optional(v.boolean()),
+    githubLogin: v.optional(v.string()),
+    githubOrganizations: v.optional(v.array(v.string())),
+  })
+    .index("email", ["email"])
+    .index("phone", ["phone"]),
 
   // ─── Existing: GitHub App installations ──────────────────────
   githubInstallations: defineTable({
@@ -31,6 +44,7 @@ export default defineSchema({
     issueCounter: v.number(), // org-wide auto-increment for issue identifiers
   })
     .index("by_slug", ["slug"])
+    .index("by_githubAccountLogin", ["githubAccountLogin"])
     .index("by_githubInstallationId", ["githubInstallationId"])
     .index("by_createdBy", ["createdBy"]),
 
@@ -201,6 +215,8 @@ export default defineSchema({
     isDraft: v.boolean(),
     baseBranch: v.string(),
     headBranch: v.string(),
+    baseSha: v.optional(v.string()),
+    headSha: v.optional(v.string()),
     authorGithubUsername: v.string(),
     authorMemberId: v.optional(v.id("members")),
     reviewers: v.optional(v.array(v.object({
@@ -267,6 +283,25 @@ export default defineSchema({
     .index("by_github", ["githubRepoFullName", "sha"])
     .index("by_repo", ["organizationId", "githubRepoFullName"]),
 
+  branches: defineTable({
+    organizationId: v.id("organizations"),
+    githubRepoFullName: v.string(),
+    branchName: v.string(),
+    baseBranch: v.string(),
+    latestCommitSha: v.string(),
+    latestCommitMessage: v.string(),
+    authorGithubUsername: v.string(),
+    authorMemberId: v.optional(v.id("members")),
+    githubUrl: v.string(),
+    committedAt: v.number(),
+    isActive: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_organizationId", ["organizationId"])
+    .index("by_repo_and_branchName", ["githubRepoFullName", "branchName"])
+    .index("by_repo", ["organizationId", "githubRepoFullName"]),
+
   // ─── Issue ↔ Pull Request links ─────────────────────────────
   issuesPullRequests: defineTable({
     issueId: v.id("issues"),
@@ -306,6 +341,24 @@ export default defineSchema({
     .index("by_githubCommentId", ["githubCommentId"]),
 
   // ─── Activity Events ───────────────────────────────────────
+  commentAttachments: defineTable({
+    commentId: v.id("comments"),
+    storageId: v.id("_storage"),
+    fileName: v.string(),
+    contentType: v.optional(v.string()),
+    size: v.optional(v.number()),
+    createdAt: v.number(),
+  }).index("by_commentId", ["commentId", "createdAt"]),
+
+  commentReactions: defineTable({
+    commentId: v.id("comments"),
+    memberId: v.id("members"),
+    emoji: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_commentId", ["commentId", "createdAt"])
+    .index("by_commentId_and_memberId_and_emoji", ["commentId", "memberId", "emoji"]),
+
   activityEvents: defineTable({
     organizationId: v.id("organizations"),
     issueId: v.optional(v.id("issues")),
@@ -397,4 +450,198 @@ export default defineSchema({
     preferredProvider: v.union(v.literal("groq"), v.literal("anthropic")),
     updatedAt: v.number(),
   }).index("by_userId", ["userId"]),
+
+  // ─── Review Orchestration Runs ───────────────────────────────
+  reviewOrchestrationRuns: defineTable({
+    organizationId: v.id("organizations"),
+    pullRequestId: v.id("pullRequests"),
+    repoFullName: v.string(),
+    prNumber: v.number(),
+    headSha: v.string(),
+    baseSha: v.optional(v.string()),
+    provider: v.union(v.literal("groq"), v.literal("anthropic")),
+    triggerSource: v.union(v.literal("manual"), v.literal("webhook")),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("fetching"),
+      v.literal("running_agents"),
+      v.literal("synthesizing"),
+      v.literal("posting"),
+      v.literal("completed"),
+      v.literal("failed"),
+      v.literal("superseded")
+    ),
+    activeAgents: v.array(v.string()),
+    summary: v.optional(v.string()),
+    error: v.optional(v.string()),
+    githubReviewId: v.optional(v.number()),
+    metrics: v.optional(v.any()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    completedAt: v.optional(v.number()),
+  })
+    .index("by_pullRequestId_and_createdAt", ["pullRequestId", "createdAt"])
+    .index("by_pullRequestId_and_headSha", ["pullRequestId", "headSha"])
+    .index("by_status_and_updatedAt", ["status", "updatedAt"]),
+
+  reviewOrchestrationFindings: defineTable({
+    organizationId: v.id("organizations"),
+    pullRequestId: v.id("pullRequests"),
+    runId: v.id("reviewOrchestrationRuns"),
+    agentName: v.string(),
+    findingKey: v.string(),
+    severity: v.union(
+      v.literal("critical"),
+      v.literal("warning"),
+      v.literal("info")
+    ),
+    title: v.string(),
+    body: v.string(),
+    suggestion: v.optional(v.string()),
+    path: v.optional(v.string()),
+    line: v.optional(v.number()),
+    startLine: v.optional(v.number()),
+    side: v.optional(v.union(v.literal("LEFT"), v.literal("RIGHT"))),
+    confidence: v.optional(v.number()),
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index("by_runId_and_createdAt", ["runId", "createdAt"])
+    .index("by_pullRequestId_and_createdAt", ["pullRequestId", "createdAt"]),
+
+  reviewOrchestrationMessages: defineTable({
+    organizationId: v.id("organizations"),
+    pullRequestId: v.id("pullRequests"),
+    runId: v.id("reviewOrchestrationRuns"),
+    role: v.union(
+      v.literal("user"),
+      v.literal("assistant"),
+      v.literal("system")
+    ),
+    content: v.string(),
+    provider: v.union(v.literal("groq"), v.literal("anthropic")),
+    createdAt: v.number(),
+  }).index("by_runId_and_createdAt", ["runId", "createdAt"]),
+
+  // ─── Normalized PR Reviews (GitHub/Copilot/App AI) ─────────
+  prReviewRuns: defineTable({
+    organizationId: v.id("organizations"),
+    pullRequestId: v.id("pullRequests"),
+    source: v.union(
+      v.literal("copilot"),
+      v.literal("github"),
+      v.literal("app_ai")
+    ),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("completed"),
+      v.literal("stale"),
+      v.literal("failed")
+    ),
+    reviewedHeadSha: v.string(),
+    githubReviewId: v.optional(v.number()),
+    authorGithubUsername: v.optional(v.string()),
+    summary: v.optional(v.string()),
+    metadata: v.optional(v.any()),
+    completedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_pullRequestId", ["pullRequestId", "createdAt"])
+    .index("by_reviewedHeadSha", ["pullRequestId", "reviewedHeadSha"])
+    .index("by_githubReviewId", ["githubReviewId"]),
+
+  prReviewThreads: defineTable({
+    organizationId: v.id("organizations"),
+    pullRequestId: v.id("pullRequests"),
+    reviewRunId: v.optional(v.id("prReviewRuns")),
+    source: v.union(
+      v.literal("copilot"),
+      v.literal("github"),
+      v.literal("app_ai")
+    ),
+    isCopilot: v.boolean(),
+    githubThreadKey: v.string(),
+    githubReviewId: v.optional(v.number()),
+    rootGithubCommentId: v.optional(v.number()),
+    subjectType: v.union(
+      v.literal("line"),
+      v.literal("file"),
+      v.literal("general")
+    ),
+    status: v.union(
+      v.literal("open"),
+      v.literal("resolved"),
+      v.literal("outdated")
+    ),
+    path: v.optional(v.string()),
+    line: v.optional(v.number()),
+    startLine: v.optional(v.number()),
+    side: v.optional(v.union(v.literal("LEFT"), v.literal("RIGHT"))),
+    severity: v.optional(
+      v.union(v.literal("critical"), v.literal("warning"), v.literal("info"))
+    ),
+    title: v.optional(v.string()),
+    summary: v.optional(v.string()),
+    snippet: v.optional(v.string()),
+    authorGithubUsername: v.optional(v.string()),
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_pullRequestId", ["pullRequestId", "updatedAt"])
+    .index("by_reviewRunId", ["reviewRunId", "updatedAt"])
+    .index("by_githubThreadKey", ["pullRequestId", "githubThreadKey"]),
+
+  prReviewComments: defineTable({
+    organizationId: v.id("organizations"),
+    pullRequestId: v.id("pullRequests"),
+    threadId: v.id("prReviewThreads"),
+    reviewRunId: v.optional(v.id("prReviewRuns")),
+    source: v.union(
+      v.literal("copilot"),
+      v.literal("github"),
+      v.literal("app_ai")
+    ),
+    role: v.union(
+      v.literal("reviewer"),
+      v.literal("author"),
+      v.literal("system")
+    ),
+    githubCommentId: v.optional(v.number()),
+    githubReviewId: v.optional(v.number()),
+    authorGithubUsername: v.optional(v.string()),
+    body: v.string(),
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_threadId", ["threadId", "createdAt"])
+    .index("by_pullRequestId", ["pullRequestId", "createdAt"])
+    .index("by_githubCommentId", ["githubCommentId"]),
+
+  projectLinks: defineTable({
+    projectId: v.id("projects"),
+    label: v.optional(v.string()),
+    url: v.string(),
+    createdAt: v.number(),
+  }).index("by_projectId", ["projectId"]),
+
+  projectFiles: defineTable({
+    projectId: v.id("projects"),
+    storageId: v.id("_storage"),
+    fileName: v.string(),
+    contentType: v.optional(v.string()),
+    size: v.optional(v.number()),
+    createdAt: v.number(),
+  }).index("by_projectId", ["projectId"]),
+
+  issueViews: defineTable({
+    memberId: v.id("members"),
+    issueId: v.id("issues"),
+    lastSeenActivityAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_memberId_and_issueId", ["memberId", "issueId"])
+    .index("by_issueId", ["issueId"]),
 });

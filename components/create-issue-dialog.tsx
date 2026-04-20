@@ -76,7 +76,13 @@ function getInitials(name: string): string {
   return name.split(" ").map((w) => w[0]).join("").toUpperCase().slice(0, 2)
 }
 
-export function CreateIssueDialog({ children }: { children: React.ReactNode }) {
+export function CreateIssueDialog({
+  children,
+  defaultProjectId,
+}: {
+  children: React.ReactNode
+  defaultProjectId?: string
+}) {
   const [open, setOpen] = React.useState(false)
   const { organization } = useOrganization()
 
@@ -89,7 +95,7 @@ export function CreateIssueDialog({ children }: { children: React.ReactNode }) {
   const [selectedLabelIds, setSelectedLabelIds] = React.useState<string[]>([])
   const [selectedRepoFullName, setSelectedRepoFullName] = React.useState<string | undefined>()
   const [selectedTeamId, setSelectedTeamId] = React.useState<string | undefined>()
-  const [selectedProjectId, setSelectedProjectId] = React.useState<string | undefined>()
+  const [selectedProjectId, setSelectedProjectId] = React.useState<string | undefined>(defaultProjectId)
   const [createMore, setCreateMore] = React.useState(false)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
 
@@ -148,8 +154,13 @@ export function CreateIssueDialog({ children }: { children: React.ReactNode }) {
     setSelectedLabelIds([])
     setSelectedRepoFullName(undefined)
     setSelectedTeamId(undefined)
-    setSelectedProjectId(undefined)
+    setSelectedProjectId(defaultProjectId)
   }
+
+  React.useEffect(() => {
+    if (!open) return
+    setSelectedProjectId((current) => current ?? defaultProjectId)
+  }, [open, defaultProjectId])
 
   const toggleRecording = async () => {
     if (isRecording) {

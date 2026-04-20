@@ -132,6 +132,8 @@ export async function fetchRepoPullRequests(
     isDraft: pr.draft || false,
     baseBranch: pr.base?.ref || "main",
     headBranch: pr.head?.ref || "unknown",
+    baseSha: pr.base?.sha || undefined,
+    headSha: pr.head?.sha || undefined,
     authorGithubUsername: pr.user?.login || "unknown",
     // These fields are NOT returned by the list endpoint.
     // They get populated when users visit the PR detail page.
@@ -211,6 +213,8 @@ export async function fetchPullRequestDetail(
     isDraft: pr.draft || false,
     baseBranch: pr.base?.ref || "main",
     headBranch: pr.head?.ref || "unknown",
+    baseSha: pr.base?.sha || undefined,
+    headSha: pr.head?.sha || undefined,
     authorGithubUsername: pr.user?.login || "unknown",
     additions: pr.additions,
     deletions: pr.deletions,
@@ -257,6 +261,174 @@ export async function fetchRepoCommits(
     changedFiles: undefined as number | undefined,
     githubRepoFullName: repoFullName,
   }));
+}
+
+export async function fetchRepoBranchesWithoutPullRequests(
+  installationId: number,
+  repoFullName: string
+) {
+  const [owner, repo] = repoFullName.split("/");
+  const octokit = await getInstallationClient(installationId);
+
+  const [{ data: repoData }, { data: branches }, { data: openPrs }] = await Promise.all([
+    octokit.request("GET /repos/{owner}/{repo}", { owner, repo }),
+    octokit.request("GET /repos/{owner}/{repo}/branches", {
+      owner,
+      repo,
+      per_page: 100,
+    }),
+    octokit.request("GET /repos/{owner}/{repo}/pulls", {
+      owner,
+      repo,
+      state: "open",
+      per_page: 100,
+    }),
+  ]);
+
+  const openHeadBranches = new Set(
+    openPrs.map((pr: any) => pr.head?.ref).filter(Boolean)
+  );
+
+  const candidateBranches = branches.filter(
+    (branch: any) =>
+      branch.name !== repoData.default_branch && !openHeadBranches.has(branch.name)
+  );
+
+  const branchDetails = await Promise.all(
+    candidateBranches.map(async (branch: any) => {
+      const { data: commits } = await octokit.request(
+        "GET /repos/{owner}/{repo}/commits",
+        {
+          owner,
+          repo,
+          sha: branch.name,
+          per_page: 1,
+        }
+      );
+
+      const latestCommit = commits[0];
+      const message = latestCommit?.commit?.message?.split("\n")[0] || branch.name;
+      const author = latestCommit?.author?.login || latestCommit?.commit?.author?.name || "unknown";
+      const committedAt = latestCommit?.commit?.committer?.date
+        ? new Date(latestCommit.commit.committer.date).getTime()
+        : Date.now();
+
+      return {
+        githubRepoFullName: repoFullName,
+        branchName: branch.name,
+        baseBranch: repoData.default_branch,
+        latestCommitSha: latestCommit?.sha || branch.commit?.sha || "",
+        latestCommitMessage: message,
+        authorGithubUsername: author,
+        githubUrl: `https://github.com/${repoFullName}/tree/${encodeURIComponent(branch.name)}`,
+        committedAt,
+      };
+    })
+  );
+
+  return branchDetails;
+}
+
+export async function fetchBranchDetail(
+  installationId: number,
+  repoFullName: string,
+  branchName: string,
+  baseBranch?: string
+) {
+  const [owner, repo] = repoFullName.split("/");
+  const octokit = await getInstallationClient(installationId);
+
+  const { data: repoData } = await octokit.request("GET /repos/{owner}/{repo}", {
+    owner,
+    repo,
+  });
+
+  const resolvedBaseBranch = baseBranch || repoData.default_branch;
+  const compareRef = `${resolvedBaseBranch}...${branchName}`;
+
+  const [{ data: compare }, { data: commits }, diffResponse] = await Promise.all([
+    octokit.request("GET /repos/{owner}/{repo}/compare/{basehead}", {
+      owner,
+      repo,
+      basehead: compareRef,
+    }),
+    octokit.request("GET /repos/{owner}/{repo}/commits", {
+      owner,
+      repo,
+      sha: branchName,
+      per_page: 20,
+    }),
+    octokit.request("GET /repos/{owner}/{repo}/compare/{basehead}", {
+      owner,
+      repo,
+      basehead: compareRef,
+      headers: { accept: "application/vnd.github.diff" },
+    }).catch(() => ({ data: "" as unknown as string })),
+  ]);
+
+  const latestCommit = commits[0];
+  const title = latestCommit?.commit?.message?.split("\n")[0] || branchName;
+  const body = latestCommit?.commit?.message?.split("\n").slice(1).join("\n").trim() || "";
+
+  return {
+    githubRepoFullName: repoFullName,
+    githubUrl: `https://github.com/${repoFullName}/tree/${encodeURIComponent(branchName)}`,
+    title,
+    body,
+    baseBranch: resolvedBaseBranch,
+    headBranch: branchName,
+    authorGithubUsername:
+      latestCommit?.author?.login || latestCommit?.commit?.author?.name || "unknown",
+    additions: compare.total_commits ? compare.files?.reduce((sum: number, file: any) => sum + (file.additions || 0), 0) : 0,
+    deletions: compare.total_commits ? compare.files?.reduce((sum: number, file: any) => sum + (file.deletions || 0), 0) : 0,
+    changedFiles: compare.files?.length || 0,
+    commits: commits.map((commit: any) => ({
+      sha: commit.sha,
+      shortSha: commit.sha.slice(0, 7),
+      message: commit.commit?.message || "",
+      authorGithubUsername: commit.author?.login || commit.commit?.author?.name || "unknown",
+      committedAt: commit.commit?.committer?.date
+        ? new Date(commit.commit.committer.date).getTime()
+        : Date.now(),
+    })),
+    diff: (diffResponse.data as unknown as string) || "",
+    files: (compare.files || []).map((file: any) => ({
+      filename: file.filename,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions,
+      patch: file.patch,
+    })),
+    aheadBy: compare.ahead_by || 0,
+  };
+}
+
+export async function createGitHubPullRequest(
+  installationId: number,
+  repoFullName: string,
+  title: string,
+  body: string | undefined,
+  headBranch: string,
+  baseBranch: string
+) {
+  const [owner, repo] = repoFullName.split("/");
+  const octokit = await getInstallationClient(installationId);
+
+  const { data } = await octokit.request("POST /repos/{owner}/{repo}/pulls", {
+    owner,
+    repo,
+    title,
+    body,
+    head: headBranch,
+    base: baseBranch,
+  });
+
+  return {
+    githubPrNumber: data.number,
+    githubRepoFullName: repoFullName,
+    githubPrId: data.id,
+    githubUrl: data.html_url,
+  };
 }
 
 /**
@@ -417,4 +589,3 @@ export async function fetchPRFiles(
     patch: (f.patch || "").substring(0, 6000),
   }));
 }
-

@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
+import type { Doc } from "./_generated/dataModel";
 
 /**
  * Save a GitHub App installation linked to the current user.
@@ -115,11 +116,49 @@ export const getMyInstallations = query({
     const userId = await getAuthUserId(ctx);
     if (!userId) return [];
 
-    const installations = await ctx.db
-      .query("githubInstallations")
+    const memberships = await ctx.db
+      .query("members")
       .withIndex("by_userId", (q) => q.eq("userId", userId))
       .collect();
 
-    return installations.filter((i) => i.status === "active");
+    const activeMemberships = memberships.filter((m) => m.status === "active");
+    const organizations = (
+      await Promise.all(
+        activeMemberships.map((membership) => ctx.db.get(membership.organizationId))
+      )
+    ).filter((organization): organization is Doc<"organizations"> => organization !== null);
+
+    const installations = await Promise.all(
+      organizations.map(async (organization) => {
+        const savedInstallation = await ctx.db
+          .query("githubInstallations")
+          .withIndex("by_installationId", (q) =>
+            q.eq("installationId", organization.githubInstallationId)
+          )
+          .first();
+
+        return {
+          _id: savedInstallation?._id,
+          userId: savedInstallation?.userId ?? organization.createdBy,
+          installationId: organization.githubInstallationId,
+          accountLogin:
+            savedInstallation?.accountLogin ?? organization.githubAccountLogin,
+          accountType:
+            savedInstallation?.accountType ?? organization.githubAccountType,
+          accountAvatarUrl:
+            savedInstallation?.accountAvatarUrl ?? organization.avatarUrl,
+          status: "active" as const,
+          installedAt: savedInstallation?.installedAt ?? organization.createdAt,
+          organizationId: organization._id,
+        };
+      })
+    );
+
+    const deduped = new Map<number, (typeof installations)[number]>();
+    for (const installation of installations) {
+      deduped.set(installation.installationId, installation);
+    }
+
+    return Array.from(deduped.values());
   },
 });

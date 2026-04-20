@@ -2,6 +2,20 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 
+function actorInitials(displayName: string) {
+  return displayName
+    .split(" ")
+    .map((w: string) => w[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+}
+
+function humanizeIssueValue(value: string | null | undefined) {
+  if (value === undefined || value === null || value === "") return "Unassigned";
+  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 // ─── Queries ──────────────────────────────────────────────────
 
 /**
@@ -12,6 +26,16 @@ export const listByOrg = query({
     orgId: v.id("organizations"),
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserId(ctx);
+    const currentMember = userId
+      ? await ctx.db
+          .query("members")
+          .withIndex("by_org_and_user", (q) =>
+            q.eq("organizationId", args.orgId).eq("userId", userId)
+          )
+          .first()
+      : null;
+
     const issues = await ctx.db
       .query("issues")
       .withIndex("by_organizationId", (q) =>
@@ -68,6 +92,61 @@ export const listByOrg = query({
           }
         }
 
+        const issueEvents = await ctx.db
+          .query("activityEvents")
+          .withIndex("by_issueId", (q) => q.eq("issueId", issue._id))
+          .order("desc")
+          .take(20);
+
+        const comments = await ctx.db
+          .query("comments")
+          .withIndex("by_issueId", (q) => q.eq("issueId", issue._id))
+          .order("desc")
+          .take(20);
+
+        let latestThreadAt = Math.max(
+          issue.createdAt,
+          ...issueEvents.map((event) => event.createdAt),
+          ...comments.map((comment) => comment.createdAt)
+        );
+
+        for (const link of linkedPRs) {
+          const prEvents = await ctx.db
+            .query("activityEvents")
+            .withIndex("by_pullRequestId", (q) =>
+              q.eq("pullRequestId", link.pullRequestId)
+            )
+            .order("desc")
+            .take(10);
+
+          for (const event of prEvents) {
+            if (
+              [
+                "pull_request_linked_to_issue",
+                "pull_request_state_changed",
+                "pull_request_checks_changed",
+                "pull_request_review_requested",
+                "pull_request_project_changed",
+                "pull_request_team_changed",
+              ].includes(event.eventType)
+            ) {
+              latestThreadAt = Math.max(latestThreadAt, event.createdAt);
+            }
+          }
+        }
+
+        let hasUnseenThreadUpdates = false;
+        if (currentMember) {
+          const issueView = await ctx.db
+            .query("issueViews")
+            .withIndex("by_memberId_and_issueId", (q) =>
+              q.eq("memberId", currentMember._id).eq("issueId", issue._id)
+            )
+            .unique();
+          hasUnseenThreadUpdates =
+            latestThreadAt > (issueView?.lastSeenActivityAt ?? 0);
+        }
+
         return {
           ...issue,
           labels: labels.filter(Boolean),
@@ -75,6 +154,8 @@ export const listByOrg = query({
           team,
           project,
           prSummary,
+          latestThreadAt,
+          hasUnseenThreadUpdates,
         };
       })
     );
@@ -346,7 +427,8 @@ export const update = mutation({
 
     if (!member) throw new Error("Not a member of this organization");
 
-    const updates: Record<string, any> = { updatedAt: Date.now() };
+    const now = Date.now();
+    const updates: Record<string, any> = { updatedAt: now };
 
     if (args.title !== undefined) updates.title = args.title;
     if (args.body !== undefined) updates.body = args.body;
@@ -360,56 +442,100 @@ export const update = mutation({
     if (args.status !== undefined && args.status !== issue.status) {
       updates.status = args.status;
       if (args.status === "done" || args.status === "cancelled") {
-        updates.completedAt = Date.now();
+        updates.completedAt = now;
       }
 
-      await ctx.db.insert("activityEvents", {
+      const activityEventId = await ctx.db.insert("activityEvents", {
         organizationId: issue.organizationId,
         issueId: args.issueId,
         eventType: "issue_status_changed",
         actorMemberId: member._id,
         actorDisplayName: member.displayName,
-        metadata: { from: issue.status, to: args.status },
+        metadata: {
+          field: "status",
+          oldValue: issue.status,
+          newValue: args.status,
+          oldLabel: humanizeIssueValue(issue.status),
+          newLabel: humanizeIssueValue(args.status),
+        },
         source: "app",
-        createdAt: Date.now(),
+        createdAt: now,
       });
 
       // Notify assignee of status change
       if (issue.assigneeId) {
-        const initials = member.displayName
-          .split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
         await ctx.db.insert("notifications", {
           memberId: issue.assigneeId,
           organizationId: issue.organizationId,
           issueId: args.issueId,
-          title: issue.title,
-          context: `${member.displayName} marked as ${args.status.replace("_", " ")}`,
+          activityEventId,
+          title: `${issue.identifier} status changed to ${humanizeIssueValue(args.status)}`,
+          context: `${member.displayName} updated issue status`,
           isRead: false,
           isSnoozed: false,
           isArchived: false,
           actorDisplayName: member.displayName,
-          actorAvatarInitials: initials,
-          createdAt: Date.now(),
+          actorAvatarInitials: actorInitials(member.displayName),
+          createdAt: now,
         });
       }
     }
 
     // Notify new assignee on reassignment
     if (args.assigneeId !== undefined && args.assigneeId !== issue.assigneeId) {
-      const initials = member.displayName
-        .split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
-      await ctx.db.insert("notifications", {
-        memberId: args.assigneeId,
+      const previousAssignee = issue.assigneeId ? await ctx.db.get(issue.assigneeId) : null;
+      const nextAssignee = args.assigneeId ? await ctx.db.get(args.assigneeId) : null;
+      const activityEventId = await ctx.db.insert("activityEvents", {
         organizationId: issue.organizationId,
         issueId: args.issueId,
-        title: issue.title,
-        context: `${member.displayName} assigned you`,
-        isRead: false,
-        isSnoozed: false,
-        isArchived: false,
+        eventType: "issue_assignee_changed",
+        actorMemberId: member._id,
         actorDisplayName: member.displayName,
-        actorAvatarInitials: initials,
-        createdAt: Date.now(),
+        metadata: {
+          field: "assignee",
+          oldValue: issue.assigneeId ?? null,
+          newValue: args.assigneeId ?? null,
+          oldLabel: previousAssignee?.displayName ?? "Unassigned",
+          newLabel: nextAssignee?.displayName ?? "Unassigned",
+        },
+        source: "app",
+        createdAt: now,
+      });
+
+      if (args.assigneeId) {
+        await ctx.db.insert("notifications", {
+          memberId: args.assigneeId,
+          organizationId: issue.organizationId,
+          issueId: args.issueId,
+          activityEventId,
+          title: `${issue.identifier} assigned to ${nextAssignee?.displayName ?? "you"}`,
+          context: `${member.displayName} updated assignee`,
+          isRead: false,
+          isSnoozed: false,
+          isArchived: false,
+          actorDisplayName: member.displayName,
+          actorAvatarInitials: actorInitials(member.displayName),
+          createdAt: now,
+        });
+      }
+    }
+
+    if (args.priority !== undefined && args.priority !== issue.priority) {
+      await ctx.db.insert("activityEvents", {
+        organizationId: issue.organizationId,
+        issueId: args.issueId,
+        eventType: "issue_priority_changed",
+        actorMemberId: member._id,
+        actorDisplayName: member.displayName,
+        metadata: {
+          field: "priority",
+          oldValue: issue.priority,
+          newValue: args.priority,
+          oldLabel: humanizeIssueValue(issue.priority),
+          newLabel: humanizeIssueValue(args.priority),
+        },
+        source: "app",
+        createdAt: now,
       });
     }
 

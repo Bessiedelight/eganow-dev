@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/sidebar"
 import { Button } from "@/components/ui/button"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   MoreHorizontal, ListFilter, SlidersHorizontal, AlertCircle, ChevronRight, CheckCircle2, CircleDashed, SignalHigh, SignalMedium, SignalLow, Plus, Calendar, MessageSquare, Zap, Bug, Users, Bookmark, CircleDot, GitPullRequest, GitMerge, XCircle, Milestone, Check, Circle
 } from "lucide-react"
@@ -26,6 +27,14 @@ const priorityIconMap: Record<string, any> = {
   medium: SignalMedium,
   low: SignalLow,
   none: CircleDashed,
+}
+
+const priorityColorMap: Record<string, string> = {
+  urgent: "text-red-500",
+  high: "text-orange-500",
+  medium: "text-amber-500",
+  low: "text-sky-500",
+  none: "text-muted-foreground/50",
 }
 
 const statusConfigMap: Record<string, { icon: any; color: string; group: "open" | "closed" }> = {
@@ -115,6 +124,10 @@ export default function UserIssuesPage() {
         id: issue.identifier,
         _id: issue._id,
         priority: priorityIconMap[issue.priority] || CircleDashed,
+        priorityColor: priorityColorMap[issue.priority] || "text-muted-foreground/50",
+        priorityLabel: issue.priority === "none"
+          ? "No priority"
+          : issue.priority.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()),
         status: sc.icon,
         statusColor: sc.color,
         title: issue.title,
@@ -128,8 +141,13 @@ export default function UserIssuesPage() {
           : issue.sequenceNumber,
         comments: issue.commentCount,
         updated: timeAgo(issue.updatedAt),
+        hasUnseenThreadUpdates: issue.hasUnseenThreadUpdates,
         assignee: issue.assignee
           ? getInitials(issue.assignee.displayName)
+          : undefined,
+        assigneeName: issue.assignee?.displayName,
+        teamName: issue.team
+          ? `${issue.team.name}${issue.team.identifier ? ` (${issue.team.identifier})` : ""}`
           : undefined,
         pr: issue.prSummary
           ? {
@@ -329,6 +347,9 @@ export default function UserIssuesPage() {
                             <span className="text-[12px] font-medium text-muted-foreground/60 shrink-0 tabular-nums w-[65px] tracking-wide">{issue.id}</span>
                             <issue.status className={`size-4 shrink-0 ${issue.statusColor}`} strokeWidth={2.5} />
                             <span className="text-[13px] font-medium text-foreground truncate">{issue.title}</span>
+                            {issue.hasUnseenThreadUpdates && (
+                              <span className="size-2 rounded-full bg-blue-500 shrink-0" />
+                            )}
                             
                             {/* Optional GitHub PR Link Block */}
                             {issue.pr && (
@@ -369,20 +390,40 @@ export default function UserIssuesPage() {
 
                             {/* Priority Block */}
                             <div className="w-[30px] flex justify-end px-2">
-                              <issue.priority className="size-3.5 text-muted-foreground/60" />
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <div className="flex items-center justify-center">
+                                    <issue.priority className={`size-3.5 ${issue.priorityColor}`} />
+                                  </div>
+                                </TooltipTrigger>
+                                <TooltipContent side="top" className="text-xs">
+                                  {issue.priorityLabel}
+                                </TooltipContent>
+                              </Tooltip>
                             </div>
 
                             {/* Assigned Avatar Block */}
                             <div className="w-[30px] flex justify-end">
-                              {issue.assignee ? (
-                                <Avatar className="size-[20px] border">
-                                  <AvatarFallback className="text-[8px] font-bold bg-muted/60 text-muted-foreground">{issue.assignee}</AvatarFallback>
-                                </Avatar>
-                              ) : (
-                                <div className="size-[20px] flex items-center justify-center rounded-full border border-dashed border-muted-foreground/40 text-muted-foreground/40">
-                                  <Users className="size-3" />
-                                </div>
-                              )}
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  {issue.assignee ? (
+                                    <Avatar className="size-[20px] border">
+                                      <AvatarFallback className="text-[8px] font-bold bg-muted/60 text-muted-foreground">{issue.assignee}</AvatarFallback>
+                                    </Avatar>
+                                  ) : (
+                                    <div className="size-[20px] flex items-center justify-center rounded-full border border-dashed border-muted-foreground/40 text-muted-foreground/40">
+                                      <Users className="size-3" />
+                                    </div>
+                                  )}
+                                </TooltipTrigger>
+                                <TooltipContent side="top" className="text-xs">
+                                  {issue.assigneeName
+                                    ? `Assigned to ${issue.assigneeName}`
+                                    : issue.teamName
+                                      ? `Assigned to team ${issue.teamName}`
+                                      : "Unassigned"}
+                                </TooltipContent>
+                              </Tooltip>
                             </div>
 
                           </div>

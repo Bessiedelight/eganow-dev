@@ -54,12 +54,10 @@ export const getMySettings = query({
       .query("aiSettings")
       .withIndex("by_userId", (q) => q.eq("userId", userId))
       .first();
-    return settings
-      ? {
-          hasAnthropicKey: !!settings.encryptedAnthropicKey,
-          preferredProvider: settings.preferredProvider,
-        }
-      : null;
+    return {
+      hasAnthropicKey: !!settings?.encryptedAnthropicKey,
+      preferredProvider: settings?.preferredProvider || "groq",
+    };
   },
 });
 

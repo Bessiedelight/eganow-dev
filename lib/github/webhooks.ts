@@ -8,7 +8,18 @@ import {
   handleIssueReopened,
   handlePullRequestOpened,
   handlePullRequestClosed,
+  handlePullRequestReadyForReview,
+  handlePullRequestConvertedToDraft,
+  handlePullRequestReopened,
+  handlePullRequestReviewRequested,
   handlePullRequestReviewSubmitted,
+  handlePullRequestReviewEdited,
+  handlePullRequestReviewDismissed,
+  handlePullRequestReviewCommentCreated,
+  handlePullRequestReviewCommentEdited,
+  handlePullRequestReviewCommentDeleted,
+  handlePullRequestReviewThreadResolved,
+  handlePullRequestReviewThreadUnresolved,
   handlePullRequestSynchronize,
   handlePush,
 } from "./handlers";
@@ -46,8 +57,34 @@ export function getWebhooks(): Webhooks {
   // ─── Pull Requests ─────────────────────────────────────────
   _webhooks.on("pull_request.opened", handlePullRequestOpened);
   _webhooks.on("pull_request.closed", handlePullRequestClosed);
+  _webhooks.on("pull_request.ready_for_review", handlePullRequestReadyForReview);
+  _webhooks.on("pull_request.converted_to_draft", handlePullRequestConvertedToDraft);
+  _webhooks.on("pull_request.reopened", handlePullRequestReopened);
+  _webhooks.on("pull_request.review_requested", handlePullRequestReviewRequested);
   _webhooks.on("pull_request.synchronize", handlePullRequestSynchronize);
   _webhooks.on("pull_request_review.submitted", handlePullRequestReviewSubmitted);
+  _webhooks.on("pull_request_review.edited", handlePullRequestReviewEdited);
+  _webhooks.on("pull_request_review.dismissed", handlePullRequestReviewDismissed);
+  _webhooks.on(
+    "pull_request_review_comment.created",
+    handlePullRequestReviewCommentCreated
+  );
+  _webhooks.on(
+    "pull_request_review_comment.edited",
+    handlePullRequestReviewCommentEdited
+  );
+  _webhooks.on(
+    "pull_request_review_comment.deleted",
+    handlePullRequestReviewCommentDeleted
+  );
+  _webhooks.on(
+    "pull_request_review_thread.resolved",
+    handlePullRequestReviewThreadResolved
+  );
+  _webhooks.on(
+    "pull_request_review_thread.unresolved",
+    handlePullRequestReviewThreadUnresolved
+  );
 
   // ─── Push ──────────────────────────────────────────────────
   _webhooks.on("push", handlePush);

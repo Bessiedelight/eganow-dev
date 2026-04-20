@@ -11,7 +11,18 @@ export {
 export {
   handlePullRequestOpened,
   handlePullRequestClosed,
+  handlePullRequestReadyForReview,
+  handlePullRequestConvertedToDraft,
+  handlePullRequestReopened,
+  handlePullRequestReviewRequested,
   handlePullRequestReviewSubmitted,
+  handlePullRequestReviewEdited,
+  handlePullRequestReviewDismissed,
+  handlePullRequestReviewCommentCreated,
+  handlePullRequestReviewCommentEdited,
+  handlePullRequestReviewCommentDeleted,
+  handlePullRequestReviewThreadResolved,
+  handlePullRequestReviewThreadUnresolved,
   handlePullRequestSynchronize,
 } from "./pull-request";
 export { handlePush } from "./push";

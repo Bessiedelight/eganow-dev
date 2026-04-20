@@ -124,7 +124,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ]
       }
     ]
-  }, [myTeams])
+  }, [myTeams, unreadCount])
 
   return (
     <Sidebar variant="inset" {...props}>

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
 import { useOrganization } from "@/hooks/use-organization"
-import { fetchRepoPullRequests, fetchInstallationRepos, fetchRepoCommits } from "@/lib/github/actions"
+import { fetchRepoPullRequests, fetchInstallationRepos, fetchRepoCommits, fetchRepoBranchesWithoutPullRequests } from "@/lib/github/actions"
 import { AppSidebar } from "@/components/app-sidebar"
 import {
   SidebarInset,
@@ -18,7 +18,7 @@ import {
   MoreHorizontal, ListFilter, SlidersHorizontal, ChevronRight,
   CheckCircle2, CircleDashed, Users, GitPullRequest, GitMerge,
   Search, RefreshCw, XCircle, GitPullRequestDraft, GitPullRequestClosed,
-  FileCode2, MessageSquare, GitCommit, ShieldCheck, ShieldAlert, Shield
+  FileCode2, MessageSquare, GitCommit, ShieldCheck, ShieldAlert, Shield, GitBranch
 } from "lucide-react"
 
 function getInitials(name: string) {
@@ -39,6 +39,10 @@ function getStatusIcon(state: string, isDraft: boolean) {
   if (state === "closed") return { icon: GitPullRequestClosed, color: "text-red-500" }
   if (isDraft) return { icon: GitPullRequestDraft, color: "text-muted-foreground" }
   return { icon: GitPullRequest, color: "text-green-500" }
+}
+
+function getBranchTitle(branch: any) {
+  return branch.latestCommitMessage || branch.branchName
 }
 
 type ViewFilter = "all" | "reviews" | "drafts" | "commits" | "merged"
@@ -64,6 +68,10 @@ export default function GitPullsPage() {
     api.pullRequests.listByOrg,
     organization ? { orgId: organization._id } : "skip"
   )
+  const branches = useQuery(
+    api.branches.listByOrg,
+    organization ? { orgId: organization._id } : "skip"
+  )
   const commits = useQuery(
     api.commits.listByOrg,
     organization ? { orgId: organization._id } : "skip"
@@ -71,6 +79,8 @@ export default function GitPullsPage() {
 
   const syncPR = useMutation(api.pullRequests.syncFromGitHub)
   const syncCommit = useMutation(api.commits.syncFromGitHub)
+  const syncBranch = useMutation(api.branches.syncFromGitHub)
+  const markRepoBranchesInactive = useMutation(api.branches.markRepoBranchesInactive)
 
   // Auto-sync from GitHub ONLY when DB is empty (first use).
   React.useEffect(() => {
@@ -98,6 +108,26 @@ export default function GitPullsPage() {
         allGhPrs.map((pr) =>
           syncPR({ orgId: organization._id, ...pr }).catch(() => {})
         )
+      )
+      // Sync pushed branches that do not yet have open pull requests
+      await Promise.allSettled(
+        repos.map(async (repo) => {
+          try {
+            await markRepoBranchesInactive({
+              orgId: organization._id,
+              githubRepoFullName: repo.fullName,
+            })
+            const ghBranches = await fetchRepoBranchesWithoutPullRequests(
+              organization.githubInstallationId,
+              repo.fullName
+            )
+            await Promise.allSettled(
+              ghBranches.map((branch) =>
+                syncBranch({ orgId: organization._id, ...branch }).catch(() => {})
+              )
+            )
+          } catch { /* skip */ }
+        })
       )
       // Sync Commits
       const allCommits: any[] = []
@@ -137,15 +167,20 @@ export default function GitPullsPage() {
     const closed = filtered.filter(p => p.state === "closed")
 
     const groups: { group: string; groupIcon: any; groupColor: string; prList: any[] }[] = []
+    const branchCandidates =
+      viewFilter === "all" || viewFilter === "drafts"
+        ? (branches || []).map((branch) => ({ ...branch, kind: "branch" as const }))
+        : []
+    if (branchCandidates.length > 0) groups.push({ group: "Ready to Open", groupIcon: GitBranch, groupColor: "text-sky-500", prList: branchCandidates })
     if (needsReview.length > 0) groups.push({ group: "Needs Review", groupIcon: GitPullRequest, groupColor: "text-green-500", prList: needsReview })
     if (drafts.length > 0) groups.push({ group: "Draft / In Progress", groupIcon: GitPullRequestDraft, groupColor: "text-muted-foreground", prList: drafts })
     if (merged.length > 0) groups.push({ group: "Recently Merged", groupIcon: GitMerge, groupColor: "text-purple-500", prList: merged })
     if (closed.length > 0) groups.push({ group: "Closed", groupIcon: GitPullRequestClosed, groupColor: "text-red-500", prList: closed })
 
     return groups
-  }, [prs, viewFilter])
+  }, [prs, branches, viewFilter])
 
-  const isLoading = orgLoading || (organization !== null && prs === undefined)
+  const isLoading = orgLoading || (organization !== null && (prs === undefined || branches === undefined))
 
   return (
     <SidebarProvider>
@@ -331,6 +366,40 @@ export default function GitPullsPage() {
                     </div>
                     <div className="flex flex-col">
                       {group.prList.map((pr: any, idx: number) => {
+                        if (pr.kind === "branch") {
+                          const branchRoute = `branch:${pr.githubRepoFullName}:${pr.branchName}`
+                          return (
+                            <div key={pr._id || idx} onClick={() => router.push(`/dashboard/pulls/${encodeURIComponent(branchRoute)}`)} className="flex items-center justify-between px-6 py-2 border-b border-border/40 even:bg-muted/20 hover:bg-muted/30 transition-colors group/issue cursor-pointer h-[42px]">
+                              <div className="flex items-center gap-3 overflow-hidden flex-1 max-w-[850px]">
+                                <MoreHorizontal className="size-3.5 text-muted-foreground/30 shrink-0 opacity-0 group-hover/issue:opacity-100 transition-opacity" />
+                                <span className="text-[11.5px] font-medium text-muted-foreground/50 shrink-0 tracking-wide w-[140px] truncate">{pr.githubRepoFullName}</span>
+                                <GitBranch className="size-4 shrink-0 text-sky-500" strokeWidth={2.5} />
+                                <span className="text-[13px] font-medium text-foreground truncate pl-0.5 max-w-[280px]">{getBranchTitle(pr)}</span>
+                                <span className="hidden xl:flex items-center gap-1.5 px-2 py-[2px] border border-sky-500/20 bg-sky-500/10 rounded-md text-[10.5px] font-mono text-sky-600 truncate w-fit">
+                                  {pr.branchName}
+                                </span>
+                              </div>
+                              <div className="flex items-center shrink-0 ml-4 opacity-80 group-hover/issue:opacity-100 transition-opacity justify-end gap-0">
+                                <div className="hidden md:flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold text-sky-600 bg-sky-500/10 w-[92px] justify-center">
+                                  <GitBranch className="size-3" />
+                                  No PR Yet
+                                </div>
+                                <div className="hidden xl:flex items-center justify-center w-[88px] text-[10.5px] text-muted-foreground/70 font-medium gap-1 ml-2">
+                                  <GitCommit className="size-3" />
+                                  <span className="font-mono">{(pr.latestCommitSha || "").slice(0, 7)}</span>
+                                </div>
+                                <div className="text-[11px] text-muted-foreground/70 w-[40px] text-right font-medium tabular-nums hidden xl:block pl-2">
+                                  {timeAgo(pr.committedAt)}
+                                </div>
+                                <div className="w-[36px] flex justify-end">
+                                  <Avatar className="size-[22px] border">
+                                    <AvatarFallback className="text-[8px] font-bold bg-sky-500/10 text-sky-600">{getInitials(pr.authorMember?.displayName || pr.authorGithubUsername)}</AvatarFallback>
+                                  </Avatar>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        }
                         const si = getStatusIcon(pr.state, pr.isDraft)
                         const StatusIcon = si.icon
                         const prId = `${pr.githubRepoFullName}#${pr.githubPrNumber}`

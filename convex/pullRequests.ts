@@ -1,6 +1,21 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { getAuthUserId } from "@convex-dev/auth/server";
+
+function actorInitials(displayName: string) {
+  return displayName
+    .split(" ")
+    .map((word) => word[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+}
+
+function humanizePullRequestValue(value: string | null | undefined) {
+  if (value === undefined || value === null || value === "") return "Unknown";
+  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
 
 // ─── Queries ──────────────────────────────────────────────────
 
@@ -169,6 +184,8 @@ export const syncFromGitHub = mutation({
     isDraft: v.boolean(),
     baseBranch: v.string(),
     headBranch: v.string(),
+    baseSha: v.optional(v.string()),
+    headSha: v.optional(v.string()),
     authorGithubUsername: v.string(),
     additions: v.optional(v.number()),
     deletions: v.optional(v.number()),
@@ -247,6 +264,8 @@ export const syncFromGitHub = mutation({
         isDraft: args.isDraft,
         baseBranch: args.baseBranch,
         headBranch: args.headBranch,
+        baseSha: args.baseSha,
+        headSha: args.headSha,
         githubUrl: args.githubUrl,
         authorMemberId: authorMember?._id || existing.authorMemberId,
         updatedAt: now,
@@ -284,12 +303,30 @@ export const syncFromGitHub = mutation({
       // ─── Notifications on state transitions ─────────────
       // PR merged → notify author
       if (args.state === "merged" && existing.state !== "merged" && existing.authorMemberId) {
+        const activityEventId = await ctx.db.insert("activityEvents", {
+          organizationId: args.orgId,
+          pullRequestId: existing._id,
+          teamId: existing.teamId,
+          projectId: existing.projectId,
+          eventType: "pull_request_state_changed",
+          actorDisplayName: args.mergedBy || "GitHub",
+          metadata: {
+            field: "state",
+            oldValue: existing.state,
+            newValue: args.state,
+            oldLabel: humanizePullRequestValue(existing.state),
+            newLabel: humanizePullRequestValue(args.state),
+          },
+          source: "github",
+          createdAt: now,
+        });
         await ctx.db.insert("notifications", {
           memberId: existing.authorMemberId,
           organizationId: args.orgId,
           pullRequestId: existing._id,
-          title: args.title,
-          context: `${args.mergedBy || "Someone"} merged your pull request`,
+          activityEventId,
+          title: `PR #${args.githubPrNumber} merged`,
+          context: `${args.mergedBy || "Someone"} updated pull request state`,
           isRead: false,
           isSnoozed: false,
           isArchived: false,
@@ -305,12 +342,30 @@ export const syncFromGitHub = mutation({
         existing.checksStatus !== "failure" &&
         existing.authorMemberId
       ) {
+        const activityEventId = await ctx.db.insert("activityEvents", {
+          organizationId: args.orgId,
+          pullRequestId: existing._id,
+          teamId: existing.teamId,
+          projectId: existing.projectId,
+          eventType: "pull_request_checks_changed",
+          actorDisplayName: "GitHub CI",
+          metadata: {
+            field: "checksStatus",
+            oldValue: existing.checksStatus ?? null,
+            newValue: args.checksStatus,
+            oldLabel: humanizePullRequestValue(existing.checksStatus ?? "unknown"),
+            newLabel: humanizePullRequestValue(args.checksStatus),
+          },
+          source: "github",
+          createdAt: now,
+        });
         await ctx.db.insert("notifications", {
           memberId: existing.authorMemberId,
           organizationId: args.orgId,
           pullRequestId: existing._id,
-          title: args.title,
-          context: `CI pipeline failed on PR #${args.githubPrNumber}`,
+          activityEventId,
+          title: `PR #${args.githubPrNumber} checks changed to Failure`,
+          context: `GitHub CI updated pull request checks`,
           isRead: false,
           isSnoozed: false,
           isArchived: false,
@@ -337,12 +392,29 @@ export const syncFromGitHub = mutation({
               n.context.includes("requested your review")
           );
           if (!alreadyNotified) {
+            const activityEventId = await ctx.db.insert("activityEvents", {
+              organizationId: args.orgId,
+              pullRequestId: existing._id,
+              teamId: existing.teamId,
+              projectId: existing.projectId,
+              eventType: "pull_request_review_requested",
+              actorMemberId: authorMember?._id,
+              actorDisplayName: args.authorGithubUsername,
+              metadata: {
+                field: "reviewer",
+                newValue: reviewer.githubUsername,
+                newLabel: reviewer.githubUsername,
+              },
+              source: "github",
+              createdAt: now,
+            });
             await ctx.db.insert("notifications", {
               memberId: reviewer.memberId,
               organizationId: args.orgId,
               pullRequestId: existing._id,
-              title: args.title,
-              context: `${args.authorGithubUsername} requested your review on PR #${args.githubPrNumber}`,
+              activityEventId,
+              title: `Review requested on PR #${args.githubPrNumber}`,
+              context: `${args.authorGithubUsername} requested your review`,
               isRead: false,
               isSnoozed: false,
               isArchived: false,
@@ -359,6 +431,7 @@ export const syncFromGitHub = mutation({
         await parseAndLinkIssues(
           ctx, args.body, existing._id, args.orgId, args.githubRepoFullName, now
         );
+        await inheritProjectAndTeamFromLinkedIssues(ctx, existing._id, now);
       }
       return existing._id;
     }
@@ -376,6 +449,8 @@ export const syncFromGitHub = mutation({
       isDraft: args.isDraft,
       baseBranch: args.baseBranch,
       headBranch: args.headBranch,
+      baseSha: args.baseSha,
+      headSha: args.headSha,
       authorGithubUsername: args.authorGithubUsername,
       authorMemberId: authorMember?._id,
       additions: args.additions,
@@ -396,6 +471,7 @@ export const syncFromGitHub = mutation({
       await parseAndLinkIssues(
         ctx, args.body, prId, args.orgId, args.githubRepoFullName, now
       );
+      await inheritProjectAndTeamFromLinkedIssues(ctx, prId, now);
     }
 
     // Notify author on new PR
@@ -419,12 +495,27 @@ export const syncFromGitHub = mutation({
     if (args.reviewers && args.reviewers.length > 0) {
       for (const reviewer of args.reviewers) {
         if (!reviewer.memberId) continue;
+        const activityEventId = await ctx.db.insert("activityEvents", {
+          organizationId: args.orgId,
+          pullRequestId: prId,
+          actorMemberId: authorMember?._id,
+          actorDisplayName: args.authorGithubUsername,
+          metadata: {
+            field: "reviewer",
+            newValue: reviewer.githubUsername,
+            newLabel: reviewer.githubUsername,
+          },
+          eventType: "pull_request_review_requested",
+          source: "github",
+          createdAt: now,
+        });
         await ctx.db.insert("notifications", {
           memberId: reviewer.memberId,
           organizationId: args.orgId,
           pullRequestId: prId,
-          title: args.title,
-          context: `${args.authorGithubUsername} requested your review on PR #${args.githubPrNumber}`,
+          activityEventId,
+          title: `Review requested on PR #${args.githubPrNumber}`,
+          context: `${args.authorGithubUsername} requested your review`,
           isRead: false,
           isSnoozed: false,
           isArchived: false,
@@ -451,16 +542,180 @@ export const update = mutation({
     projectId: v.optional(v.id("projects")),
   },
   handler: async (ctx, args) => {
-    const updates: Record<string, any> = { updatedAt: Date.now() };
+    const now = Date.now();
+    const pr = await ctx.db.get(args.prId);
+    if (!pr) throw new Error("Pull request not found");
+
+    const updates: Record<string, any> = { updatedAt: now };
     if (args.title !== undefined) updates.title = args.title;
     if (args.body !== undefined) updates.body = args.body;
     if (args.teamId !== undefined) updates.teamId = args.teamId;
     if (args.projectId !== undefined) updates.projectId = args.projectId;
+
+    const userId = await getAuthUserId(ctx);
+    const actorMember = userId
+      ? await ctx.db
+          .query("members")
+          .withIndex("by_org_and_user", (q) =>
+            q.eq("organizationId", pr.organizationId).eq("userId", userId)
+          )
+          .first()
+      : null;
+    const actorDisplayName = actorMember?.displayName || "Someone";
+
+    if (args.projectId !== undefined && args.projectId !== pr.projectId) {
+      const previousProject = pr.projectId ? await ctx.db.get(pr.projectId) : null;
+      const nextProject = args.projectId ? await ctx.db.get(args.projectId) : null;
+      await ctx.db.insert("activityEvents", {
+        organizationId: pr.organizationId,
+        pullRequestId: pr._id,
+        teamId: args.teamId ?? pr.teamId,
+        projectId: args.projectId ?? pr.projectId,
+        eventType: "pull_request_project_changed",
+        actorMemberId: actorMember?._id,
+        actorDisplayName,
+        metadata: {
+          field: "project",
+          oldValue: pr.projectId ?? null,
+          newValue: args.projectId ?? null,
+          oldLabel: previousProject?.name ?? "No project",
+          newLabel: nextProject?.name ?? "No project",
+        },
+        source: "app",
+        createdAt: now,
+      });
+    }
+
+    if (args.teamId !== undefined && args.teamId !== pr.teamId) {
+      const previousTeam = pr.teamId ? await ctx.db.get(pr.teamId) : null;
+      const nextTeam = args.teamId ? await ctx.db.get(args.teamId) : null;
+      await ctx.db.insert("activityEvents", {
+        organizationId: pr.organizationId,
+        pullRequestId: pr._id,
+        teamId: args.teamId ?? pr.teamId,
+        projectId: args.projectId ?? pr.projectId,
+        eventType: "pull_request_team_changed",
+        actorMemberId: actorMember?._id,
+        actorDisplayName,
+        metadata: {
+          field: "team",
+          oldValue: pr.teamId ?? null,
+          newValue: args.teamId ?? null,
+          oldLabel: previousTeam?.name ?? "No team",
+          newLabel: nextTeam?.name ?? "No team",
+        },
+        source: "app",
+        createdAt: now,
+      });
+    }
+
     await ctx.db.patch(args.prId, updates);
   },
 });
 
 // ─── Helper: Parse PR body for issue references ───────────────
+
+export const linkToIssue = mutation({
+  args: {
+    prId: v.id("pullRequests"),
+    issueId: v.id("issues"),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const pr = await ctx.db.get(args.prId);
+    const issue = await ctx.db.get(args.issueId);
+
+    if (!pr) throw new Error("Pull request not found");
+    if (!issue) throw new Error("Issue not found");
+    if (pr.organizationId !== issue.organizationId) {
+      throw new Error("Issue and pull request must belong to the same organization");
+    }
+
+    const existingLinks = await ctx.db
+      .query("issuesPullRequests")
+      .withIndex("by_pullRequestId", (q) => q.eq("pullRequestId", args.prId))
+      .collect();
+
+    const alreadyLinked = existingLinks.some((link) => link.issueId === args.issueId);
+    if (alreadyLinked) {
+      return { linked: true, alreadyLinked: true };
+    }
+
+    await ctx.db.insert("issuesPullRequests", {
+      issueId: args.issueId,
+      pullRequestId: args.prId,
+      linkType: "manual",
+      source: "app",
+      createdAt: now,
+    });
+
+    await inheritProjectAndTeamFromLinkedIssues(ctx, args.prId, now);
+
+    const userId = await getAuthUserId(ctx);
+    const actorMember = userId
+      ? await ctx.db
+          .query("members")
+          .withIndex("by_org_and_user", (q) =>
+            q.eq("organizationId", pr.organizationId).eq("userId", userId)
+          )
+          .first()
+      : null;
+
+    const actorDisplayName = actorMember?.displayName || "Someone";
+    const actorAvatarInitials = actorDisplayName
+      .split(" ")
+      .map((word) => word[0])
+      .join("")
+      .toUpperCase()
+      .slice(0, 2);
+
+    const activityEventId = await ctx.db.insert("activityEvents", {
+      organizationId: pr.organizationId,
+      issueId: issue._id,
+      pullRequestId: pr._id,
+      teamId: issue.teamId ?? pr.teamId,
+      projectId: issue.projectId ?? pr.projectId,
+      eventType: "pull_request_linked_to_issue",
+      actorMemberId: actorMember?._id,
+      actorDisplayName,
+      metadata: {
+        linkType: "manual",
+        issueIdentifier: issue.identifier,
+        issueTitle: issue.title,
+        pullRequestNumber: pr.githubPrNumber,
+        pullRequestTitle: pr.title,
+        repoFullName: pr.githubRepoFullName,
+      },
+      source: "app",
+      createdAt: now,
+    });
+
+    const recipientIds = new Set<Id<"members">>();
+    if (issue.assigneeId) recipientIds.add(issue.assigneeId);
+    if (pr.authorMemberId) recipientIds.add(pr.authorMemberId);
+    if (actorMember?._id) recipientIds.delete(actorMember._id);
+
+    for (const memberId of recipientIds) {
+      await ctx.db.insert("notifications", {
+        memberId,
+        organizationId: pr.organizationId,
+        issueId: issue._id,
+        pullRequestId: pr._id,
+        activityEventId,
+        title: `Linked PR #${pr.githubPrNumber} to ${issue.identifier}`,
+        context: `${actorDisplayName} linked a pull request to an issue`,
+        isRead: false,
+        isSnoozed: false,
+        isArchived: false,
+        actorDisplayName,
+        actorAvatarInitials,
+        createdAt: now,
+      });
+    }
+
+    return { linked: true, alreadyLinked: false };
+  },
+});
 
 async function parseAndLinkIssues(
   ctx: any,
@@ -578,4 +833,57 @@ async function parseAndLinkIssues(
       }
     }
   }
+}
+
+async function inheritProjectAndTeamFromLinkedIssues(
+  ctx: any,
+  pullRequestId: any,
+  now: number
+) {
+  const pr = await ctx.db.get(pullRequestId);
+  if (!pr) return;
+
+  const links = await ctx.db
+    .query("issuesPullRequests")
+    .withIndex("by_pullRequestId", (q: any) => q.eq("pullRequestId", pullRequestId))
+    .collect();
+
+  if (links.length === 0) return;
+
+  const linkedIssues = (
+    await Promise.all(links.map((link: any) => ctx.db.get(link.issueId)))
+  ).filter(Boolean);
+
+  if (linkedIssues.length === 0) return;
+
+  const projectIds = Array.from(
+    new Set(
+      linkedIssues
+        .map((issue: any) => issue.projectId)
+        .filter((projectId: any) => projectId !== undefined && projectId !== null)
+    )
+  );
+
+  const teamIds = Array.from(
+    new Set(
+      linkedIssues
+        .map((issue: any) => issue.teamId)
+        .filter((teamId: any) => teamId !== undefined && teamId !== null)
+    )
+  );
+
+  const updates: Record<string, any> = {};
+
+  if (projectIds.length === 1 && pr.projectId !== projectIds[0]) {
+    updates.projectId = projectIds[0];
+  }
+
+  if (teamIds.length === 1 && pr.teamId !== teamIds[0]) {
+    updates.teamId = teamIds[0];
+  }
+
+  if (Object.keys(updates).length === 0) return;
+
+  updates.updatedAt = now;
+  await ctx.db.patch(pullRequestId, updates);
 }

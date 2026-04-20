@@ -28,7 +28,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { format } from "date-fns"
 import { 
   FolderKanban, Plus, MoreHorizontal, ListFilter, SlidersHorizontal, 
-  CircleDashed, Clock, GitFork, Check, Calendar as CalendarIcon
+  CircleDashed, Clock, GitFork, Check, Calendar as CalendarIcon,
+  Briefcase, Target, Flag, Lightbulb, Package, Rocket, Globe,
+  Shield, Zap, Database, Cpu, Layers, Palette, Monitor, Lock,
+  Settings, Star, Heart, Bug, Code2, Smartphone, Car, Headset, HardDrive, Wifi
 } from "lucide-react"
 
 const statusStyles: Record<string, { label: string, color: string, bg: string, border: string }> = {
@@ -37,6 +40,40 @@ const statusStyles: Record<string, { label: string, color: string, bg: string, b
   "paused": { label: "Paused", color: "text-yellow-600 dark:text-yellow-400", bg: "bg-yellow-500/10", border: "border-yellow-500/20" },
   "completed": { label: "Completed", color: "text-emerald-500", bg: "bg-emerald-500/10", border: "border-emerald-500/20" },
   "cancelled": { label: "Cancelled", color: "text-red-500", bg: "bg-red-500/10", border: "border-red-500/20" },
+}
+
+const PROJECT_ICONS: { icon: any; name: string; color: string }[] = [
+  { icon: FolderKanban, name: "FolderKanban", color: "text-indigo-500" },
+  { icon: Briefcase, name: "Briefcase", color: "text-slate-600" },
+  { icon: Target, name: "Target", color: "text-red-500" },
+  { icon: Flag, name: "Flag", color: "text-orange-500" },
+  { icon: Lightbulb, name: "Lightbulb", color: "text-amber-500" },
+  { icon: Package, name: "Package", color: "text-emerald-500" },
+  { icon: Rocket, name: "Rocket", color: "text-purple-500" },
+  { icon: Globe, name: "Globe", color: "text-cyan-500" },
+  { icon: Shield, name: "Shield", color: "text-red-500" },
+  { icon: Zap, name: "Zap", color: "text-yellow-500" },
+  { icon: Database, name: "Database", color: "text-amber-600" },
+  { icon: Cpu, name: "Cpu", color: "text-slate-500" },
+  { icon: Layers, name: "Layers", color: "text-pink-500" },
+  { icon: Palette, name: "Palette", color: "text-orange-500" },
+  { icon: Monitor, name: "Monitor", color: "text-teal-500" },
+  { icon: Lock, name: "Lock", color: "text-stone-500" },
+  { icon: Settings, name: "Settings", color: "text-zinc-500" },
+  { icon: Star, name: "Star", color: "text-yellow-500" },
+  { icon: Heart, name: "Heart", color: "text-pink-500" },
+  { icon: Bug, name: "Bug", color: "text-rose-500" },
+  { icon: Code2, name: "Code2", color: "text-blue-500" },
+  { icon: Smartphone, name: "Smartphone", color: "text-violet-500" },
+  { icon: Car, name: "Car", color: "text-indigo-500" },
+  { icon: Headset, name: "Headset", color: "text-cyan-500" },
+  { icon: HardDrive, name: "HardDrive", color: "text-yellow-600" },
+  { icon: Wifi, name: "Wifi", color: "text-sky-500" },
+]
+
+function getProjectIconByName(name: string | undefined) {
+  const found = PROJECT_ICONS.find((item) => item.name === name)
+  return found || PROJECT_ICONS[0]
 }
 
 export default function ProjectsPage() {
@@ -49,6 +86,7 @@ export default function ProjectsPage() {
   const [createOpen, setCreateOpen] = React.useState(false)
   const [newName, setNewName] = React.useState("")
   const [newDescription, setNewDescription] = React.useState("")
+  const [newIcon, setNewIcon] = React.useState("FolderKanban")
   const [newTargetDate, setNewTargetDate] = React.useState<Date | undefined>()
   const [isCreating, setIsCreating] = React.useState(false)
 
@@ -72,10 +110,13 @@ export default function ProjectsPage() {
     if (!newName.trim() || !organization) return
     setIsCreating(true)
     try {
+      const iconMeta = getProjectIconByName(newIcon)
       const projectId = await createProject({
         orgId: organization._id,
         name: newName.trim(),
         description: newDescription.trim() || undefined,
+        icon: newIcon,
+        color: iconMeta.color,
         startDate: Date.now(), // Auto-set to the day of creation
         targetDate: newTargetDate ? newTargetDate.getTime() : undefined,
         githubRepoFullNames: selectedRepos.length > 0 ? selectedRepos : undefined,
@@ -84,6 +125,7 @@ export default function ProjectsPage() {
       setCreateOpen(false)
       setNewName("")
       setNewDescription("")
+      setNewIcon("FolderKanban")
       setNewTargetDate(undefined)
       setSelectedRepos([])
       router.push(`/dashboard/projects/${projectId}`)
@@ -131,6 +173,29 @@ export default function ProjectsPage() {
                   <DialogTitle className="text-[16px] font-semibold tracking-tight">Create Project</DialogTitle>
                 </DialogHeader>
                 <div className="px-6 pb-6 flex flex-col gap-4">
+                  {/* Icon Picker */}
+                  <div>
+                    <label className="text-[12px] font-medium text-muted-foreground mb-2 block">Icon</label>
+                    <div className="grid grid-cols-9 gap-1.5">
+                      {PROJECT_ICONS.map((item) => {
+                        const IconComp = item.icon
+                        return (
+                          <button
+                            key={item.name}
+                            type="button"
+                            onClick={() => setNewIcon(item.name)}
+                            className={`size-9 flex items-center justify-center rounded-lg border transition-all ${
+                              newIcon === item.name
+                                ? "border-[#5e6ad2] bg-[#5e6ad2]/10 ring-1 ring-[#5e6ad2]/30"
+                                : "border-border/40 hover:bg-muted/40 hover:border-border/60"
+                            }`}
+                          >
+                            <IconComp className={`size-4 ${item.color}`} />
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
                   {/* Name */}
                   <div>
                     <label className="text-[12px] font-medium text-muted-foreground mb-1.5 block">Project Name</label>
@@ -261,6 +326,8 @@ export default function ProjectsPage() {
                 <tbody className="bg-background relative">
                   {projects.map((proj) => {
                     const st = statusStyles[proj.status] || statusStyles["planned"]
+                    const iconMeta = getProjectIconByName(proj.icon)
+                    const ProjectIcon = iconMeta.icon
                     return (
                       <tr
                         key={proj._id}
@@ -270,7 +337,7 @@ export default function ProjectsPage() {
                         <td className="px-5 py-3">
                           <div className="flex items-center gap-3">
                             <div className="size-8 rounded-lg border border-border/60 bg-muted/30 flex items-center justify-center shrink-0">
-                              <FolderKanban className="size-4 text-muted-foreground group-hover:text-foreground transition-colors" />
+                              <ProjectIcon className={`size-4 ${iconMeta.color}`} />
                             </div>
                             <div className="flex flex-col">
                               <span className="text-[13px] font-medium text-foreground">{proj.name}</span>

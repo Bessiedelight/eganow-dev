@@ -2,6 +2,26 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 
+function humanizeValue(value: string | null | undefined) {
+  if (value === undefined || value === null || value === "") return null;
+  return value
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function shouldHideFromInbox(activityEvent: any) {
+  if (!activityEvent) return false;
+  return [
+    "issue_status_changed",
+    "issue_assignee_changed",
+    "issue_priority_changed",
+    "issue_project_changed",
+    "issue_team_changed",
+    "issue_title_changed",
+    "issue_body_changed",
+  ].includes(activityEvent.eventType);
+}
+
 // ─── Helper: resolve current member ──────────────────────────
 async function getCurrentMember(ctx: any, orgId: any) {
   const userId = await getAuthUserId(ctx);
@@ -60,6 +80,14 @@ export const listForCurrentUser = query({
     // Enrich with linked entity data
     const enriched = await Promise.all(
       notifications.slice(0, 50).map(async (n) => {
+        const activityEvent = n.activityEventId
+          ? await ctx.db.get(n.activityEventId)
+          : null;
+
+        if (shouldHideFromInbox(activityEvent)) {
+          return null;
+        }
+
         let linkedEntity: {
           type: "issue" | "pullRequest" | null;
           identifier?: string;
@@ -67,6 +95,18 @@ export const listForCurrentUser = query({
           body?: string;
           route?: string;
         } = { type: null };
+
+        let secondaryEntity: {
+          type: "issue" | "pullRequest" | null;
+          identifier?: string;
+          title?: string;
+          route?: string;
+        } = { type: null };
+        let displayTitle = n.title;
+        let displayContext = n.context;
+        let changeSummary: string | null = null;
+        let changeFromLabel: string | null = null;
+        let changeToLabel: string | null = null;
 
         if (n.issueId) {
           const issue = await ctx.db.get(n.issueId);
@@ -93,25 +133,82 @@ export const listForCurrentUser = query({
           }
         }
 
+        if (
+          activityEvent?.eventType === "pull_request_linked_to_issue" &&
+          n.issueId &&
+          n.pullRequestId
+        ) {
+          const issue = await ctx.db.get(n.issueId);
+          const pr = await ctx.db.get(n.pullRequestId);
+
+          if (issue && pr) {
+            const prId = `${pr.githubRepoFullName}#${pr.githubPrNumber}`;
+            linkedEntity = {
+              type: "issue",
+              identifier: issue.identifier,
+              title: issue.title,
+              body: issue.body,
+              route: `/dashboard/issues/${issue.identifier.replace("#", "")}`,
+            };
+            secondaryEntity = {
+              type: "pullRequest",
+              identifier: prId,
+              title: pr.title,
+              route: `/dashboard/pulls/${encodeURIComponent(prId)}`,
+            };
+          }
+        }
+
         // Derive notification type from context
         const ctx_lower = n.context.toLowerCase();
-        let notifType: "review" | "mention" | "assignment" | "ci" | "status" | "comment" | "merge" = "status";
-        if (ctx_lower.includes("review") || ctx_lower.includes("approved")) notifType = "review";
+        let notifType: "review" | "mention" | "assignment" | "ci" | "status" | "comment" | "merge" | "link" = "status";
+        if (activityEvent?.eventType === "pull_request_linked_to_issue") {
+          notifType = "link";
+        }
+        else if (ctx_lower.includes("review") || ctx_lower.includes("approved")) notifType = "review";
         else if (ctx_lower.includes("mention")) notifType = "mention";
         else if (ctx_lower.includes("assign")) notifType = "assignment";
         else if (ctx_lower.includes("ci") || ctx_lower.includes("pipeline") || ctx_lower.includes("failed")) notifType = "ci";
         else if (ctx_lower.includes("comment") || ctx_lower.includes("replied")) notifType = "comment";
         else if (ctx_lower.includes("merged")) notifType = "merge";
 
+        if (activityEvent?.metadata?.field && activityEvent?.metadata?.newLabel) {
+          const fieldLabel = humanizeValue(activityEvent.metadata.field) || "Updated";
+          changeFromLabel = activityEvent.metadata.oldLabel ?? humanizeValue(activityEvent.metadata.oldValue);
+          changeToLabel = activityEvent.metadata.newLabel ?? humanizeValue(activityEvent.metadata.newValue);
+          changeSummary = `${fieldLabel} changed${changeToLabel ? ` to ${changeToLabel}` : ""}`;
+          displayTitle =
+            linkedEntity.identifier && changeToLabel
+              ? `${linkedEntity.identifier} ${fieldLabel.toLowerCase()} changed to ${changeToLabel}`
+              : `${fieldLabel} changed`;
+          displayContext = `${activityEvent.actorDisplayName || n.actorDisplayName} updated ${fieldLabel.toLowerCase()}`;
+          notifType =
+            activityEvent.metadata.field === "assignee" ? "assignment" :
+            activityEvent.metadata.field === "checksStatus" ? "ci" :
+            activityEvent.metadata.field === "state" &&
+            activityEvent.pullRequestId &&
+            activityEvent.metadata.newValue === "merged" ? "merge" :
+            "status";
+        } else if (activityEvent?.eventType === "pull_request_linked_to_issue") {
+          changeSummary = "Pull request linked to issue";
+        }
+
         return {
           ...n,
           linkedEntity,
+          secondaryEntity,
+          activityEvent,
           notifType,
+          displayTitle,
+          displayContext,
+          changeSummary,
+          changeFromLabel,
+          changeToLabel,
         };
       })
     );
 
-    return enriched;
+    return enriched.filter(Boolean);
   },
 });
 
@@ -131,7 +228,24 @@ export const getUnreadCount = query({
       )
       .collect();
 
-    return unread.filter((n) => !n.isArchived).length;
+    let count = 0;
+    for (const notification of unread) {
+      if (notification.isArchived) continue;
+      if (
+        notification.isSnoozed &&
+        notification.snoozedUntil &&
+        notification.snoozedUntil > Date.now()
+      ) {
+        continue;
+      }
+      const activityEvent = notification.activityEventId
+        ? await ctx.db.get(notification.activityEventId)
+        : null;
+      if (shouldHideFromInbox(activityEvent)) continue;
+      count++;
+    }
+
+    return count;
   },
 });
 

@@ -41,6 +41,24 @@ export async function handlePush(event: EmitterWebhookEvent<"push">) {
         committedAt: commit.timestamp
           ? new Date(commit.timestamp).getTime()
           : Date.now(),
+        });
+    }
+
+    const latestCommit = commits[commits.length - 1];
+    if (latestCommit) {
+      await convex.mutation(api.branches.syncFromGitHub, {
+        orgId,
+        githubRepoFullName: repository.full_name,
+        branchName: branch,
+        baseBranch: repository.default_branch,
+        latestCommitSha: latestCommit.id,
+        latestCommitMessage: latestCommit.message.split("\n")[0],
+        authorGithubUsername:
+          latestCommit.author?.username ?? latestCommit.author?.name ?? pusherLogin,
+        githubUrl: `https://github.com/${repository.full_name}/tree/${encodeURIComponent(branch)}`,
+        committedAt: latestCommit.timestamp
+          ? new Date(latestCommit.timestamp).getTime()
+          : Date.now(),
       });
     }
 

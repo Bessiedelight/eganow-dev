@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
 import { useOrganization } from "@/hooks/use-organization"
+import { toast } from "sonner"
 import { AppSidebar } from "@/components/app-sidebar"
 import {
   SidebarInset,
@@ -28,7 +29,7 @@ import {
   Inbox, SlidersHorizontal, ChevronDown, CheckCircle2,
   Clock, Link2, MoreHorizontal, User, Check, CircleDot, ChevronRight, MessageSquare,
   PlayCircle, Milestone, XCircle, GitPullRequest, GitMerge,
-  ShieldCheck, AlertTriangle, Paperclip
+  ShieldCheck, AlertTriangle, Paperclip, Reply, Send, Smile, X, Loader2, Image as ImageIcon
 } from "lucide-react"
 
 // ─── Icon + color map per notification type ───────────────────
@@ -40,6 +41,7 @@ const NOTIF_TYPE_MAP: Record<string, { icon: any; color: string }> = {
   status: { icon: CheckCircle2, color: "text-purple-500" },
   comment: { icon: MessageSquare, color: "text-blue-400" },
   merge: { icon: GitMerge, color: "text-purple-500" },
+  link: { icon: Link2, color: "text-emerald-500" },
 }
 
 function timeAgo(ts: number) {
@@ -67,6 +69,37 @@ function ReadOnlyPropertyRow({ label, value, icon, iconColor = "text-muted-foreg
   )
 }
 
+const EMOJI_OPTIONS = ["👍", "❤️", "🎉", "👀", "🔥", "🚀"]
+
+type PendingAttachment = {
+  storageId: string
+  fileName: string
+  contentType?: string
+  size?: number
+  previewUrl?: string
+}
+
+function renderLinkedText(text: string) {
+  const parts = text.split(/(https?:\/\/[^\s]+)/g)
+  return parts.map((part, index) => {
+    if (!part) return null
+    if (/^https?:\/\/[^\s]+$/i.test(part)) {
+      return (
+        <a
+          key={`${part}-${index}`}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-[#5e6ad2] underline underline-offset-2 break-all"
+        >
+          {part}
+        </a>
+      )
+    }
+    return <React.Fragment key={`${index}-${part.slice(0, 12)}`}>{part}</React.Fragment>
+  })
+}
+
 
 export default function Page() {
   const router = useRouter()
@@ -78,6 +111,17 @@ export default function Page() {
   const [ageLimit, setAgeLimit] = React.useState<"all_time" | "last_24h" | "last_7d" | "last_30d">("all_time")
   const [showSnoozed, setShowSnoozed] = React.useState<boolean>(false)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
+  const [optimisticReadIds, setOptimisticReadIds] = React.useState<string[]>([])
+  const [discussionBody, setDiscussionBody] = React.useState("")
+  const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null)
+  const [pendingAttachments, setPendingAttachments] = React.useState<PendingAttachment[]>([])
+  const [isSubmittingDiscussion, setIsSubmittingDiscussion] = React.useState(false)
+  const [isUploadingAttachment, setIsUploadingAttachment] = React.useState(false)
+  const [reactingKey, setReactingKey] = React.useState<string | null>(null)
+  const [isDiscussionExpanded, setIsDiscussionExpanded] = React.useState(false)
+  const [discussionSeenAt, setDiscussionSeenAt] = React.useState<number>(Date.now())
+  const attachmentInputRef = React.useRef<HTMLInputElement>(null)
+  const discussionPanelRef = React.useRef<HTMLDivElement>(null)
   
   // Keep recently-read notifications in the list during the active session 
   // so they don't immediately vanish when clicked.
@@ -93,6 +137,22 @@ export default function Page() {
     api.notifications.listForCurrentUser,
     organization ? { orgId: organization._id, filter: "all", retainedIds: retainedIds as any[] } : "skip"
   )
+  const selectedNotification = rawNotifications?.find((n) => n._id === selectedId) ?? null
+  const threadIssueId = selectedNotification?.issueId ?? null
+  const threadPullRequestId =
+    selectedNotification && !selectedNotification.issueId
+      ? selectedNotification.pullRequestId ?? null
+      : null
+  const discussionThread = useQuery(
+    api.comments.listThread,
+    organization && (threadIssueId || threadPullRequestId)
+      ? {
+          orgId: organization._id,
+          issueId: threadIssueId || undefined,
+          pullRequestId: threadPullRequestId || undefined,
+        }
+      : "skip"
+  )
 
   // Auto-switch to "all" on load if zero unread exist natively
   React.useEffect(() => {
@@ -107,7 +167,9 @@ export default function Page() {
 
   const notifications = React.useMemo(() => {
     if (!rawNotifications) return undefined;
-    let filtered = rawNotifications.filter(n => {
+    let filtered = rawNotifications
+      .map((n) => optimisticReadIds.includes(n._id) ? { ...n, isRead: true } : n)
+      .filter(n => {
       // Age limit filter
       const ageMs = Date.now() - n.createdAt;
       if (ageLimit === "last_24h" && ageMs > 24 * 60 * 60 * 1000) return false;
@@ -137,13 +199,16 @@ export default function Page() {
     }
 
     return filtered;
-  }, [rawNotifications, filter, retainedIds, ordering, ageLimit, showSnoozed])
+  }, [rawNotifications, filter, retainedIds, ordering, ageLimit, showSnoozed, optimisticReadIds])
 
   // ─── Mutations ────────────────────────────────────────
   const markRead = useMutation(api.notifications.markAsRead)
   const markAllRead = useMutation(api.notifications.markAllAsRead)
   const snoozeMut = useMutation(api.notifications.snooze)
   const archiveMut = useMutation(api.notifications.archive)
+  const createThreadComment = useMutation(api.comments.createThreadComment)
+  const generateAttachmentUploadUrl = useMutation(api.comments.generateAttachmentUploadUrl)
+  const toggleReaction = useMutation(api.comments.toggleReaction)
 
   // ─── Selected notification ────────────────────────────
   const selected = notifications?.find((n) => n._id === selectedId) ?? null
@@ -155,13 +220,106 @@ export default function Page() {
     }
   }, [notifications, selectedId])
 
-  const handleSelect = async (n: any) => {
+  React.useEffect(() => {
+    setDiscussionBody("")
+    setReplyTargetId(null)
+    setIsDiscussionExpanded(false)
+    setPendingAttachments((previous) => {
+      previous.forEach((attachment) => {
+        if (attachment.previewUrl?.startsWith("blob:")) {
+          URL.revokeObjectURL(attachment.previewUrl)
+        }
+      })
+      return []
+    })
+  }, [selectedId])
+
+  React.useEffect(() => {
+    setDiscussionSeenAt(Date.now())
+  }, [selectedId])
+
+  const replyTarget = React.useMemo(
+    () => discussionThread?.find((comment: any) => comment._id === replyTargetId) ?? null,
+    [discussionThread, replyTargetId]
+  )
+
+  const threadByParent = React.useMemo(() => {
+    const map = new Map<string, any[]>()
+    for (const comment of discussionThread || []) {
+      const key = comment.parentCommentId || "root"
+      const existing = map.get(key) || []
+      existing.push(comment)
+      map.set(key, existing)
+    }
+    return map
+  }, [discussionThread])
+
+  const latestThreadTimestamp = React.useMemo(
+    () => Math.max(0, ...(discussionThread?.map((comment: any) => comment.createdAt) || [])),
+    [discussionThread]
+  )
+
+  const newMessageCount = React.useMemo(
+    () =>
+      (discussionThread || []).filter((comment: any) => comment.createdAt > discussionSeenAt).length,
+    [discussionThread, discussionSeenAt]
+  )
+
+  React.useEffect(() => {
+    if (isDiscussionExpanded && latestThreadTimestamp) {
+      setDiscussionSeenAt(latestThreadTimestamp)
+    }
+  }, [isDiscussionExpanded, latestThreadTimestamp])
+
+  React.useEffect(() => {
+    const panel = discussionPanelRef.current
+    if (!panel) return
+
+    let cancelled = false
+    import("gsap").then(({ gsap }) => {
+      if (cancelled || !panel) return
+      gsap.killTweensOf(panel)
+
+      if (isDiscussionExpanded) {
+        gsap.set(panel, { display: "block", overflow: "hidden" })
+        gsap.fromTo(
+          panel,
+          { height: 0, opacity: 0, y: -8 },
+          { height: "auto", opacity: 1, y: 0, duration: 0.24, ease: "power2.out" }
+        )
+      } else {
+        gsap.fromTo(
+          panel,
+          { height: panel.offsetHeight || "auto", opacity: 1, y: 0 },
+          {
+            height: 0,
+            opacity: 0,
+            y: -6,
+            duration: 0.2,
+            ease: "power2.inOut",
+            onComplete: () => {
+              gsap.set(panel, { display: "none" })
+            },
+          }
+        )
+      }
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [isDiscussionExpanded, discussionThread?.length])
+
+  const handleSelect = (n: any) => {
     setSelectedId(n._id)
     if (!n.isRead) {
       if (filter === "unread") {
         setRetainedIds(prev => Array.from(new Set([...prev, n._id])))
       }
-      await markRead({ notificationId: n._id })
+      setOptimisticReadIds((prev) => Array.from(new Set([...prev, n._id])))
+      void markRead({ notificationId: n._id }).catch(() => {
+        setOptimisticReadIds((prev) => prev.filter((id) => id !== n._id))
+      })
     }
   }
 
@@ -178,6 +336,225 @@ export default function Page() {
   const handleArchive = async (id: any) => {
     await archiveMut({ notificationId: id })
     if (selectedId === id) setSelectedId(null)
+  }
+
+  const handleAttachmentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || [])
+    if (!files.length) return
+
+    setIsUploadingAttachment(true)
+    try {
+      const uploaded: PendingAttachment[] = []
+      for (const file of files) {
+        const uploadUrl = await generateAttachmentUploadUrl({})
+        const response = await fetch(uploadUrl, {
+          method: "POST",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: file,
+        })
+
+        if (!response.ok) throw new Error("Upload failed")
+        const { storageId } = await response.json()
+
+        uploaded.push({
+          storageId,
+          fileName: file.name,
+          contentType: file.type || undefined,
+          size: file.size,
+          previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+        })
+      }
+
+      setPendingAttachments((previous) => [...previous, ...uploaded])
+    } catch {
+      toast.error("Failed to upload attachment")
+    } finally {
+      setIsUploadingAttachment(false)
+      if (event.target) event.target.value = ""
+    }
+  }
+
+  const removePendingAttachment = (storageId: string) => {
+    setPendingAttachments((previous) =>
+      previous.filter((attachment) => {
+        if (attachment.storageId === storageId && attachment.previewUrl?.startsWith("blob:")) {
+          URL.revokeObjectURL(attachment.previewUrl)
+        }
+        return attachment.storageId !== storageId
+      })
+    )
+  }
+
+  const handlePostDiscussion = async () => {
+    if (!organization || (!threadIssueId && !threadPullRequestId)) return
+    if (!discussionBody.trim() && pendingAttachments.length === 0) return
+
+    setIsSubmittingDiscussion(true)
+    try {
+      await createThreadComment({
+        issueId: threadIssueId || undefined,
+        pullRequestId: threadPullRequestId || undefined,
+        parentCommentId: replyTargetId || undefined,
+        body: discussionBody.trim(),
+        attachments: pendingAttachments.map((attachment) => ({
+          storageId: attachment.storageId as any,
+          fileName: attachment.fileName,
+          contentType: attachment.contentType,
+          size: attachment.size,
+        })),
+      })
+      setDiscussionBody("")
+      setReplyTargetId(null)
+      setPendingAttachments((previous) => {
+        previous.forEach((attachment) => {
+          if (attachment.previewUrl?.startsWith("blob:")) {
+            URL.revokeObjectURL(attachment.previewUrl)
+          }
+        })
+        return []
+      })
+      toast.success("Message posted")
+    } catch {
+      toast.error("Failed to post message")
+    } finally {
+      setIsSubmittingDiscussion(false)
+    }
+  }
+
+  const handleToggleReaction = async (commentId: string, emoji: string) => {
+    setReactingKey(`${commentId}:${emoji}`)
+    try {
+      await toggleReaction({ commentId: commentId as any, emoji })
+    } catch {
+      toast.error("Failed to update reaction")
+    } finally {
+      setReactingKey(null)
+    }
+  }
+
+  const renderDiscussionNode = (comment: any, depth = 0): React.ReactNode => {
+    const replies = threadByParent.get(comment._id) || []
+
+    return (
+      <div key={comment._id} className={depth > 0 ? "ml-8 border-l border-border/50 pl-4" : ""}>
+        <div className="rounded-xl border border-border/60 bg-background p-3">
+          <div className="flex items-start gap-3">
+            <Avatar className="mt-0.5 size-8 border bg-blue-100 text-blue-600 dark:bg-blue-900/30">
+              <AvatarFallback className="text-[10px] font-bold">
+                {comment.authorDisplayName
+                  ?.split(" ")
+                  .map((word: string) => word[0])
+                  .join("")
+                  .slice(0, 2)
+                  .toUpperCase() || "??"}
+              </AvatarFallback>
+            </Avatar>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="text-[13px] font-semibold text-foreground">{comment.authorDisplayName}</span>
+                <span className="text-[11px] text-muted-foreground">{timeAgo(comment.createdAt)} ago</span>
+                {comment.parentCommentId && (
+                  <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    Reply
+                  </span>
+                )}
+              </div>
+              <div className="mt-2 whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-foreground/90">
+                {renderLinkedText(comment.body)}
+              </div>
+
+              {comment.attachments?.length > 0 && (
+                <div className="mt-2.5 space-y-2">
+                  {comment.attachments.map((attachment: any) =>
+                    attachment.isImage ? (
+                      <a
+                        key={attachment._id}
+                        href={attachment.url || "#"}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block overflow-hidden rounded-lg border border-border/60 bg-muted/5"
+                      >
+                        <img
+                          src={attachment.url || ""}
+                          alt={attachment.fileName}
+                          className="max-h-[220px] w-full object-cover"
+                        />
+                      </a>
+                    ) : (
+                      <a
+                        key={attachment._id}
+                        href={attachment.url || "#"}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-[12px] text-foreground hover:bg-muted/20"
+                      >
+                        <Paperclip className="size-3.5 text-muted-foreground" />
+                        <span className="truncate">{attachment.fileName}</span>
+                      </a>
+                    )
+                  )}
+                </div>
+              )}
+
+              <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                {comment.reactions?.map((reaction: any) => (
+                  <button
+                    key={`${comment._id}-${reaction.emoji}`}
+                    type="button"
+                    onClick={() => handleToggleReaction(comment._id, reaction.emoji)}
+                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                      reaction.reactedByMe
+                        ? "border-[#5e6ad2]/25 bg-[#5e6ad2]/5 text-[#5e6ad2]"
+                        : "border-border/60 bg-background text-muted-foreground hover:bg-muted/20"
+                    }`}
+                  >
+                    <span>{reaction.emoji}</span>
+                    <span className="tabular-nums">{reaction.count}</span>
+                    {reactingKey === `${comment._id}:${reaction.emoji}` && <Loader2 className="size-3 animate-spin" />}
+                  </button>
+                ))}
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button variant="ghost" size="sm" className="h-7 rounded-full px-2 text-[11px] text-muted-foreground hover:bg-muted/20">
+                      <Smile className="size-3.5" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="start" className="w-auto gap-2 p-2">
+                    <div className="flex items-center gap-1">
+                      {EMOJI_OPTIONS.map((emoji) => (
+                        <button
+                          key={`${comment._id}-${emoji}-picker`}
+                          type="button"
+                          onClick={() => handleToggleReaction(comment._id, emoji)}
+                          className="rounded-md px-2 py-1 text-lg transition-colors hover:bg-muted"
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </PopoverContent>
+                </Popover>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 rounded-full px-2.5 text-[11px] text-muted-foreground hover:bg-muted/20"
+                  onClick={() => setReplyTargetId(comment._id)}
+                >
+                  <Reply className="size-3.5" />
+                  Reply
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {replies.length > 0 && (
+          <div className="mt-3 space-y-3">
+            {replies.map((reply) => renderDiscussionNode(reply, depth + 1))}
+          </div>
+        )}
+      </div>
+    )
   }
 
   const isLoading = orgLoading || (organization !== null && notifications === undefined)
@@ -323,11 +700,11 @@ export default function Page() {
                         <div className="flex-1 space-y-1 overflow-hidden pr-12">
                           <div className="flex items-center justify-between">
                             <span className="text-[11px] text-muted-foreground truncate font-medium flex items-center gap-1.5">
-                              {n.context}
+                              {n.displayContext || n.context}
                             </span>
                           </div>
                           <h4 className={`text-[13px] truncate ${!n.isRead ? 'font-semibold text-foreground' : 'font-medium text-foreground/80'}`}>
-                            {n.title}
+                            {n.displayTitle || n.title}
                           </h4>
                         </div>
 
@@ -446,11 +823,11 @@ export default function Page() {
                           { className: `size-4 ${(NOTIF_TYPE_MAP[selected.notifType] || NOTIF_TYPE_MAP.status).color}` }
                         )}
                         <span className="text-[13px] text-foreground font-medium">
-                          {selected.context} · {timeAgo(selected.createdAt)} ago
+                          {(selected.displayContext || selected.context)} · {timeAgo(selected.createdAt)} ago
                         </span>
                       </div>
 
-                      <h1 className="text-3xl font-semibold tracking-tight mb-2 text-foreground">{selected.title}</h1>
+                      <h1 className="text-3xl font-semibold tracking-tight mb-2 text-foreground">{selected.displayTitle || selected.title}</h1>
                       
                       {selected.linkedEntity?.identifier && (
                         <p className="text-muted-foreground text-[14px] mb-8 font-mono">
@@ -461,6 +838,48 @@ export default function Page() {
                       {selected.linkedEntity?.body && (
                         <div className="text-[14.5px] leading-relaxed text-foreground/90 whitespace-pre-wrap">
                           {selected.linkedEntity.body}
+                        </div>
+                      )}
+
+                      {(selected.notifType === "link" || selected.changeSummary) && (
+                        <div className="mt-6 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4">
+                          <div className="flex items-center gap-2 text-[12px] font-semibold uppercase tracking-wider text-emerald-600 mb-3">
+                            <Link2 className="size-3.5" /> What changed
+                          </div>
+                          <div className="space-y-2 text-[13px]">
+                            {selected.changeSummary && (
+                              <div className="flex items-start gap-2">
+                                <CircleDot className="size-3.5 text-green-500 mt-0.5 shrink-0" />
+                                <div>
+                                  <div className="font-medium text-foreground">{selected.changeSummary}</div>
+                                  {(selected.changeFromLabel || selected.changeToLabel) && (
+                                    <div className="text-muted-foreground">
+                                      {selected.changeFromLabel ? `${selected.changeFromLabel} → ` : ""}
+                                      {selected.changeToLabel || "Updated"}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                            {selected.linkedEntity?.identifier && (
+                              <div className="flex items-start gap-2">
+                                <CircleDot className="size-3.5 text-green-500 mt-0.5 shrink-0" />
+                                <div>
+                                  <div className="font-medium text-foreground">{selected.linkedEntity.identifier}</div>
+                                  <div className="text-muted-foreground">{selected.linkedEntity.title}</div>
+                                </div>
+                              </div>
+                            )}
+                            {selected.secondaryEntity?.identifier && (
+                              <div className="flex items-start gap-2">
+                                <GitPullRequest className="size-3.5 text-blue-500 mt-0.5 shrink-0" />
+                                <div>
+                                  <div className="font-medium text-foreground">{selected.secondaryEntity.identifier}</div>
+                                  <div className="text-muted-foreground">{selected.secondaryEntity.title}</div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
 
@@ -483,6 +902,17 @@ export default function Page() {
                               View full {selected.linkedEntity.type === "issue" ? "issue" : "pull request"}
                             </Button>
                           )}
+                          {selected.secondaryEntity?.route && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border/60"
+                              onClick={() => router.push(selected.secondaryEntity!.route!)}
+                            >
+                              <GitPullRequest className="size-3.5" />
+                              View linked pull request
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="sm"
@@ -502,6 +932,222 @@ export default function Page() {
                             Snooze
                           </Button>
                         </div>
+                      </div>
+
+                      <div className="py-8">
+                        <Separator className="bg-border/60" />
+                      </div>
+
+                      <div className="mt-2">
+                        <div className="mb-5 flex items-center justify-between gap-3">
+                          <div>
+                            <h3 className="font-semibold text-[14px] text-foreground">Discussion</h3>
+                            <p className="mt-1 text-[12px] text-muted-foreground">
+                              Keep follow-up messages, replies, links, and attachments in one clean thread.
+                            </p>
+                          </div>
+                          {(threadIssueId || threadPullRequestId) && (
+                            <div className="flex items-center gap-2">
+                              {newMessageCount > 0 && !isDiscussionExpanded && (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-blue-500/20 bg-blue-500/5 px-2.5 py-1 text-[11px] font-medium text-blue-600">
+                                  <span className="size-1.5 rounded-full bg-blue-500" />
+                                  {newMessageCount} new
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setIsDiscussionExpanded((previous) => !previous)}
+                                className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted/20 hover:text-foreground"
+                              >
+                                {(discussionThread?.length || 0).toString()} messages
+                                <ChevronDown className={`size-3.5 transition-transform ${isDiscussionExpanded ? "rotate-180" : ""}`} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        {(threadIssueId || threadPullRequestId) ? (
+                          <div className="space-y-5">
+                            <div
+                              className="rounded-xl border border-border/60 bg-background p-3"
+                              onClick={() => {
+                                if (!isDiscussionExpanded) setIsDiscussionExpanded(true)
+                              }}
+                            >
+                              {replyTarget && (
+                                <div className="mb-3 flex items-center justify-between rounded-lg border border-border/60 bg-muted/5 px-3 py-2">
+                                  <div className="min-w-0">
+                                    <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                                      Replying to {replyTarget.authorDisplayName}
+                                    </div>
+                                    <div className="truncate text-[12px] text-foreground/80">{replyTarget.body}</div>
+                                  </div>
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7 shrink-0 text-muted-foreground"
+                                    onClick={() => setReplyTargetId(null)}
+                                  >
+                                    <X className="size-3.5" />
+                                  </Button>
+                                </div>
+                              )}
+
+                              <textarea
+                                value={discussionBody}
+                                onChange={(event) => setDiscussionBody(event.target.value)}
+                                onFocus={() => setIsDiscussionExpanded(true)}
+                                placeholder="Write a message, paste a link, or reply to the thread..."
+                                className="min-h-[72px] w-full resize-none rounded-lg border border-border/60 bg-background px-3 py-2.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+                              />
+
+                              {pendingAttachments.length > 0 && (
+                                <div className="mt-2.5 flex flex-wrap gap-2">
+                                  {pendingAttachments.map((attachment) => (
+                                    <div
+                                      key={attachment.storageId}
+                                      className="flex items-center gap-2 rounded-full border border-border/60 bg-muted/5 px-3 py-1.5 text-[11px] text-foreground"
+                                    >
+                                      {attachment.contentType?.startsWith("image/") ? (
+                                        <ImageIcon className="size-3.5 text-muted-foreground" />
+                                      ) : (
+                                        <Paperclip className="size-3.5 text-muted-foreground" />
+                                      )}
+                                      <span className="max-w-[160px] truncate">{attachment.fileName}</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => removePendingAttachment(attachment.storageId)}
+                                        className="text-muted-foreground transition-colors hover:text-foreground"
+                                      >
+                                        <X className="size-3.5" />
+                                      </button>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
+                              <div className="mt-2.5 flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    ref={attachmentInputRef}
+                                    type="file"
+                                    multiple
+                                    className="hidden"
+                                    onChange={handleAttachmentUpload}
+                                  />
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 gap-1.5 rounded-full px-3 text-[12px] text-muted-foreground hover:bg-muted/20"
+                                    onClick={() => attachmentInputRef.current?.click()}
+                                    disabled={isUploadingAttachment}
+                                  >
+                                    {isUploadingAttachment ? (
+                                      <Loader2 className="size-3.5 animate-spin" />
+                                    ) : (
+                                      <Paperclip className="size-3.5" />
+                                    )}
+                                    Add files
+                                  </Button>
+                                  <Popover>
+                                    <PopoverTrigger asChild>
+                                      <Button variant="ghost" size="sm" className="h-7 gap-1.5 rounded-full px-3 text-[12px] text-muted-foreground hover:bg-muted/20">
+                                        <Smile className="size-3.5" />
+                                        Reactions
+                                      </Button>
+                                    </PopoverTrigger>
+                                    <PopoverContent align="start" className="w-auto gap-2 p-2">
+                                      <div className="flex items-center gap-1">
+                                        {EMOJI_OPTIONS.map((emoji) => (
+                                          <button
+                                            key={`composer-${emoji}`}
+                                            type="button"
+                                            onClick={() => setDiscussionBody((previous) => `${previous}${emoji}`)}
+                                            className="rounded-md px-2 py-1 text-lg transition-colors hover:bg-muted"
+                                          >
+                                            {emoji}
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </PopoverContent>
+                                  </Popover>
+                                </div>
+                                <Button
+                                  onClick={handlePostDiscussion}
+                                  disabled={isSubmittingDiscussion || (!discussionBody.trim() && pendingAttachments.length === 0)}
+                                  className="h-7 gap-1.5 rounded-full bg-[#5e6ad2] px-4 text-white hover:bg-[#5e6ad2]/90"
+                                >
+                                  {isSubmittingDiscussion ? <Loader2 className="size-3.5 animate-spin" /> : <Send className="size-3.5" />}
+                                  Send
+                                </Button>
+                              </div>
+                            </div>
+
+                            <div
+                              className="overflow-hidden"
+                              ref={discussionPanelRef}
+                              style={{ display: "none" }}
+                            >
+                              {discussionThread === undefined ? (
+                                <div className="flex items-center justify-center rounded-xl border border-border/60 bg-background py-10">
+                                  <Loader2 className="size-5 animate-spin text-muted-foreground" />
+                                </div>
+                              ) : discussionThread.length > 0 ? (
+                                <div className="space-y-4">
+                                  {(threadByParent.get("root") || []).map((comment) => renderDiscussionNode(comment))}
+                                </div>
+                              ) : (
+                                <div className="rounded-xl border border-dashed border-border/60 bg-background px-6 py-10 text-center">
+                                  <div className="mx-auto flex size-10 items-center justify-center rounded-full border border-border/60 bg-muted/5">
+                                    <MessageSquare className="size-4 text-muted-foreground" />
+                                  </div>
+                                  <div className="mt-3 text-[13px] font-medium text-foreground">No discussion yet</div>
+                                  <div className="mt-1 text-[12px] text-muted-foreground">
+                                    Start the thread here and keep the context attached to this work item.
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+
+                            {!isDiscussionExpanded && (
+                              <div className="rounded-xl border border-border/60 bg-muted/5 px-4 py-3 text-[12px] text-muted-foreground">
+                                {discussionThread && discussionThread.length > 0 ? (
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span className="truncate">
+                                      Latest from {discussionThread[discussionThread.length - 1].authorDisplayName}:{" "}
+                                      {discussionThread[discussionThread.length - 1].body}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setIsDiscussionExpanded(true)}
+                                      className="shrink-0 font-medium text-foreground transition-colors hover:text-[#5e6ad2]"
+                                    >
+                                      Expand
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center justify-between gap-3">
+                                    <span>Messages stay tucked away until you open the thread.</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setIsDiscussionExpanded(true)}
+                                      className="shrink-0 font-medium text-foreground transition-colors hover:text-[#5e6ad2]"
+                                    >
+                                      Open
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-border/60 bg-background px-6 py-10 text-center">
+                            <div className="text-[13px] font-medium text-foreground">Discussion appears for linked work</div>
+                            <div className="mt-1 text-[12px] text-muted-foreground">
+                              Open a notification tied to an issue or pull request to chat here.
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                     </div>
@@ -530,7 +1176,7 @@ export default function Page() {
 
                       {/* Context Info */}
                       <ReadOnlyPropertyRow label="Context" value={
-                        <span className="truncate">{selected.context}</span>
+                        <span className="truncate">{selected.displayContext || selected.context}</span>
                       } icon={MessageSquare} />
 
                       {/* Created At */}
@@ -548,6 +1194,12 @@ export default function Page() {
                         <ReadOnlyPropertyRow label="Source" value={
                           <span className="truncate font-mono font-semibold tracking-tight">{selected.linkedEntity.identifier}</span>
                         } icon={selected.linkedEntity.type === "issue" ? CircleDot : GitPullRequest} iconColor={selected.linkedEntity.type === "issue" ? "text-green-500" : "text-blue-500"} />
+                      )}
+
+                      {selected.secondaryEntity?.type && (
+                        <ReadOnlyPropertyRow label="Linked PR" value={
+                          <span className="truncate font-mono font-semibold tracking-tight">{selected.secondaryEntity.identifier}</span>
+                        } icon={GitPullRequest} iconColor="text-blue-500" />
                       )}
 
                     </div>
