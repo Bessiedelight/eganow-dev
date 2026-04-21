@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
+import type { Doc, Id } from "./_generated/dataModel";
 
 function actorInitials(displayName: string) {
   return displayName
@@ -14,6 +15,65 @@ function actorInitials(displayName: string) {
 function humanizeIssueValue(value: string | null | undefined) {
   if (value === undefined || value === null || value === "") return "Unassigned";
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function dedupeAssigneeIds(memberIds: Id<"members">[]) {
+  return Array.from(new Set(memberIds));
+}
+
+function normalizeAssigneeIds(args: {
+  assigneeId?: Id<"members">;
+  assigneeIds?: Id<"members">[];
+}) {
+  if (args.assigneeIds !== undefined) {
+    return dedupeAssigneeIds(args.assigneeIds);
+  }
+  if (args.assigneeId !== undefined) {
+    return args.assigneeId ? [args.assigneeId] : [];
+  }
+  return undefined;
+}
+
+function getIssueAssigneeIds(issue: {
+  assigneeId?: Id<"members">;
+  assigneeIds?: Id<"members">[];
+}) {
+  if (issue.assigneeIds && issue.assigneeIds.length > 0) {
+    return dedupeAssigneeIds(issue.assigneeIds);
+  }
+  return issue.assigneeId ? [issue.assigneeId] : [];
+}
+
+async function loadAssigneeMembers(
+  ctx: any,
+  organizationId: Id<"organizations">,
+  assigneeIds: Id<"members">[]
+): Promise<Doc<"members">[]> {
+  const assignees = await Promise.all(
+    assigneeIds.map(async (assigneeId) => {
+      const assignee = await ctx.db.get(assigneeId);
+      if (!assignee) {
+        throw new Error("Assignee not found");
+      }
+      if (assignee.organizationId !== organizationId) {
+        throw new Error("Assignee must belong to this organization");
+      }
+      return assignee;
+    })
+  );
+  return assignees;
+}
+
+function sameAssignees(left: Id<"members">[], right: Id<"members">[]) {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function describeAssignees(
+  assignees: Array<{ displayName: string }> | null | undefined
+) {
+  if (!assignees || assignees.length === 0) return "Unassigned";
+  return assignees.map((assignee) => assignee.displayName).join(", ");
 }
 
 // ─── Queries ──────────────────────────────────────────────────
@@ -52,10 +112,11 @@ export const listByOrg = query({
           ? await Promise.all(issue.labelIds.map((id) => ctx.db.get(id)))
           : [];
 
-        // Resolve assignee
-        const assignee = issue.assigneeId
-          ? await ctx.db.get(issue.assigneeId)
-          : null;
+        const assigneeIds = getIssueAssigneeIds(issue);
+        const assignees = (
+          await Promise.all(assigneeIds.map((id) => ctx.db.get(id)))
+        ).filter((assignee): assignee is Doc<"members"> => assignee !== null);
+        const assignee = assignees[0] ?? null;
 
         // Resolve team
         const team = issue.teamId ? await ctx.db.get(issue.teamId) : null;
@@ -151,6 +212,7 @@ export const listByOrg = query({
           ...issue,
           labels: labels.filter(Boolean),
           assignee,
+          assignees,
           team,
           project,
           prSummary,
@@ -200,10 +262,11 @@ export const getByIdentifier = query({
       ? await Promise.all(issue.labelIds.map((id) => ctx.db.get(id)))
       : [];
 
-    // Resolve assignee
-    const assignee = issue.assigneeId
-      ? await ctx.db.get(issue.assigneeId)
-      : null;
+    const assigneeIds = getIssueAssigneeIds(issue);
+    const assignees = (
+      await Promise.all(assigneeIds.map((id) => ctx.db.get(id)))
+    ).filter((assignee): assignee is Doc<"members"> => assignee !== null);
+    const assignee = assignees[0] ?? null;
 
     // Resolve creator
     const creator = await ctx.db.get(issue.creatorId);
@@ -241,6 +304,7 @@ export const getByIdentifier = query({
       ...issue,
       labels: labels.filter(Boolean),
       assignee,
+      assignees,
       creator,
       team,
       project,
@@ -288,6 +352,7 @@ export const create = mutation({
     teamId: v.optional(v.id("teams")),
     projectId: v.optional(v.id("projects")),
     assigneeId: v.optional(v.id("members")),
+    assigneeIds: v.optional(v.array(v.id("members"))),
     labelIds: v.optional(v.array(v.id("labels"))),
     // GitHub sync fields (set after creating on GitHub)
     githubRepoFullName: v.optional(v.string()),
@@ -325,6 +390,11 @@ export const create = mutation({
     }
 
     const now = Date.now();
+    const assigneeIds = normalizeAssigneeIds({
+      assigneeId: args.assigneeId,
+      assigneeIds: args.assigneeIds,
+    }) ?? [];
+    await loadAssigneeMembers(ctx, args.orgId, assigneeIds);
 
     const issueId = await ctx.db.insert("issues", {
       organizationId: args.orgId,
@@ -336,7 +406,8 @@ export const create = mutation({
       priority: args.priority,
       teamId: args.teamId,
       projectId: args.projectId,
-      assigneeId: args.assigneeId,
+      assigneeId: assigneeIds[0],
+      assigneeIds: assigneeIds.length > 0 ? assigneeIds : undefined,
       creatorId: member._id,
       labelIds: args.labelIds,
       githubRepoFullName: args.githubRepoFullName,
@@ -356,12 +427,12 @@ export const create = mutation({
       createdAt: now,
     });
 
-    // Notify assignee (even if self, to allow testing/personal reminders)
-    if (args.assigneeId) {
-      const initials = member.displayName
-        .split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
+    const initials = member.displayName
+      .split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
+
+    for (const assigneeId of assigneeIds) {
       await ctx.db.insert("notifications", {
-        memberId: args.assigneeId,
+        memberId: assigneeId,
         organizationId: args.orgId,
         issueId,
         title: args.title,
@@ -409,6 +480,7 @@ export const update = mutation({
     teamId: v.optional(v.id("teams")),
     projectId: v.optional(v.id("projects")),
     assigneeId: v.optional(v.id("members")),
+    assigneeIds: v.optional(v.array(v.id("members"))),
     labelIds: v.optional(v.array(v.id("labels"))),
   },
   handler: async (ctx, args) => {
@@ -429,14 +501,28 @@ export const update = mutation({
 
     const now = Date.now();
     const updates: Record<string, any> = { updatedAt: now };
+    const nextAssigneeIds = normalizeAssigneeIds({
+      assigneeId: args.assigneeId,
+      assigneeIds: args.assigneeIds,
+    });
+    const currentAssigneeIds = getIssueAssigneeIds(issue);
 
     if (args.title !== undefined) updates.title = args.title;
     if (args.body !== undefined) updates.body = args.body;
     if (args.priority !== undefined) updates.priority = args.priority;
     if (args.teamId !== undefined) updates.teamId = args.teamId;
     if (args.projectId !== undefined) updates.projectId = args.projectId;
-    if (args.assigneeId !== undefined) updates.assigneeId = args.assigneeId;
     if (args.labelIds !== undefined) updates.labelIds = args.labelIds;
+    if (nextAssigneeIds !== undefined) {
+      const assignees = await loadAssigneeMembers(
+        ctx,
+        issue.organizationId,
+        nextAssigneeIds
+      );
+      updates.assigneeId = nextAssigneeIds[0];
+      updates.assigneeIds =
+        nextAssigneeIds.length > 0 ? nextAssigneeIds : undefined;
+    }
 
     // Track status changes for activity events
     if (args.status !== undefined && args.status !== issue.status) {
@@ -462,10 +548,9 @@ export const update = mutation({
         createdAt: now,
       });
 
-      // Notify assignee of status change
-      if (issue.assigneeId) {
+      for (const assigneeId of currentAssigneeIds) {
         await ctx.db.insert("notifications", {
-          memberId: issue.assigneeId,
+          memberId: assigneeId,
           organizationId: issue.organizationId,
           issueId: args.issueId,
           activityEventId,
@@ -481,10 +566,16 @@ export const update = mutation({
       }
     }
 
-    // Notify new assignee on reassignment
-    if (args.assigneeId !== undefined && args.assigneeId !== issue.assigneeId) {
-      const previousAssignee = issue.assigneeId ? await ctx.db.get(issue.assigneeId) : null;
-      const nextAssignee = args.assigneeId ? await ctx.db.get(args.assigneeId) : null;
+    if (
+      nextAssigneeIds !== undefined &&
+      !sameAssignees(currentAssigneeIds, nextAssigneeIds)
+    ) {
+      const previousAssignees = (
+        await Promise.all(currentAssigneeIds.map((id) => ctx.db.get(id)))
+      ).filter((assignee): assignee is Doc<"members"> => assignee !== null);
+      const nextAssignees = (
+        await Promise.all(nextAssigneeIds.map((id) => ctx.db.get(id)))
+      ).filter((assignee): assignee is Doc<"members"> => assignee !== null);
       const activityEventId = await ctx.db.insert("activityEvents", {
         organizationId: issue.organizationId,
         issueId: args.issueId,
@@ -492,24 +583,28 @@ export const update = mutation({
         actorMemberId: member._id,
         actorDisplayName: member.displayName,
         metadata: {
-          field: "assignee",
-          oldValue: issue.assigneeId ?? null,
-          newValue: args.assigneeId ?? null,
-          oldLabel: previousAssignee?.displayName ?? "Unassigned",
-          newLabel: nextAssignee?.displayName ?? "Unassigned",
+          field: "assignees",
+          oldValue: currentAssigneeIds,
+          newValue: nextAssigneeIds,
+          oldLabel: describeAssignees(previousAssignees),
+          newLabel: describeAssignees(nextAssignees),
         },
         source: "app",
         createdAt: now,
       });
 
-      if (args.assigneeId) {
+      const addedAssigneeIds = nextAssigneeIds.filter(
+        (assigneeId) => !currentAssigneeIds.includes(assigneeId)
+      );
+
+      for (const assigneeId of addedAssigneeIds) {
         await ctx.db.insert("notifications", {
-          memberId: args.assigneeId,
+          memberId: assigneeId,
           organizationId: issue.organizationId,
           issueId: args.issueId,
           activityEventId,
-          title: `${issue.identifier} assigned to ${nextAssignee?.displayName ?? "you"}`,
-          context: `${member.displayName} updated assignee`,
+          title: `${issue.identifier} assigned to you`,
+          context: `${member.displayName} updated assignees`,
           isRead: false,
           isSnoozed: false,
           isArchived: false,
@@ -602,8 +697,10 @@ export const syncFromGitHub = mutation({
     // Resolve author to member
     const authorMember = await ctx.db
       .query("members")
-      .withIndex("by_githubUsername", (q) =>
-        q.eq("githubUsername", args.authorGithubUsername)
+      .withIndex("by_organizationId_and_githubUsername", (q) =>
+        q
+          .eq("organizationId", args.orgId)
+          .eq("githubUsername", args.authorGithubUsername.toLowerCase())
       )
       .first();
 

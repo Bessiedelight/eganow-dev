@@ -15,6 +15,7 @@ import type * as auth from "../auth.js";
 import type * as branches from "../branches.js";
 import type * as comments from "../comments.js";
 import type * as commits from "../commits.js";
+import type * as debugOrg from "../debugOrg.js";
 import type * as github from "../github.js";
 import type * as http from "../http.js";
 import type * as issues from "../issues.js";
@@ -44,6 +45,7 @@ declare const fullApi: ApiFromModules<{
   branches: typeof branches;
   comments: typeof comments;
   commits: typeof commits;
+  debugOrg: typeof debugOrg;
   github: typeof github;
   http: typeof http;
   issues: typeof issues;

@@ -22,6 +22,8 @@ import { useTheme } from "next-themes"
 import { useAuthActions } from "@convex-dev/auth/react"
 import { useMutation, useQuery } from "convex/react"
 import { api } from "@/convex/_generated/api"
+import { getCodexLaunchUrl } from "@/lib/codex/handoff"
+import { useOrganization } from "@/hooks/use-organization"
 
 function GithubIcon(props: React.ComponentProps<"svg">) {
   return (
@@ -124,6 +126,7 @@ export default function SettingsPage() {
   const searchParams = useSearchParams()
 
   const user = useQuery(api.users.current)
+  const { organization } = useOrganization()
 
   const installations = useQuery(api.github.getMyInstallations)
   const [isConnectingInstallation, setIsConnectingInstallation] = React.useState(false)
@@ -159,6 +162,7 @@ export default function SettingsPage() {
 
         await bootstrapFromInstallation({
           installationId: installation.installationId,
+          memberUsernames: installation.memberUsernames,
         })
 
         router.replace("/dashboard/settings")
@@ -213,13 +217,12 @@ export default function SettingsPage() {
       <AppSidebar />
       <SidebarInset className="overflow-hidden bg-background">
         <div className="absolute inset-0 flex flex-col overflow-hidden text-sm bg-background">
-          
           {/* Main Top Header Navigation */}
           <div className="h-14 flex items-center justify-between px-6 border-b shrink-0 transition-all bg-background/95 backdrop-blur z-20 relative text-sm">
             <div className="flex items-center text-[13px] font-medium text-foreground gap-1.5">
               <SidebarTrigger className="-ml-3 mr-1" />
               <Button variant="ghost" size="sm" className="h-7 px-1.5 gap-1.5 text-muted-foreground hover:text-foreground">
-                <PlayCircle className="size-3.5 fill-blue-500 text-white dark:text-background" /> SulBoard
+                <PlayCircle className="size-3.5 fill-blue-500 text-white dark:text-background" /> {organization?.name || "Organization"}
               </Button>
               <ChevronRight className="size-3 text-muted-foreground/40" />
               <Button variant="ghost" size="sm" className="h-7 px-1.5 gap-1.5 text-foreground font-semibold">
@@ -234,7 +237,7 @@ export default function SettingsPage() {
           </div>
 
           {/* Settings Canvas Layout */}
-          <div className="flex-1 overflow-y-auto [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:bg-muted-foreground/10 [&::-webkit-scrollbar-thumb]:rounded-full bg-muted/20 dark:bg-background relative">
+          <div className="flex-1 overflow-y-auto [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:bg-muted-foreground/10 [&::-webkit-scrollbar-thumb]:rounded-full bg-muted/20 dark:bg-muted/10 relative">
             <div className="max-w-[700px] mx-auto w-full px-8 py-14 pb-24">
               
               <h1 className="text-3xl font-semibold tracking-tight text-foreground mb-12">
@@ -450,16 +453,7 @@ export default function SettingsPage() {
                   {/* ── Claude Connection ── */}
                   <Separator className="bg-border/60" />
 
-                  <div>
-                    <div className="flex flex-col mb-4">
-                      <span className="text-[14.5px] font-semibold text-foreground">Codex Agent</span>
-                      <span className="text-[13px] text-muted-foreground mt-1 max-w-xl leading-relaxed">
-                        Connect Codex so users can start issue-fixing workflows and prepare pull requests.
-                      </span>
-                    </div>
-
-                    <CodexSettingsCard />
-                  </div>
+           
 
                   <Separator className="bg-border/60" />
 
@@ -486,35 +480,81 @@ export default function SettingsPage() {
 
 // ─── Claude Settings Card ──────────────────────────────────────
 function CodexSettingsCard() {
+  const handleOpenCodex = () => {
+    window.open(getCodexLaunchUrl(), "_blank", "noopener,noreferrer")
+  }
+
+  const handleOpenGitHubSetup = () => {
+    window.open(
+      "https://help.openai.com/en/articles/11145903-connecting-github-to-chatgpt",
+      "_blank",
+      "noopener,noreferrer"
+    )
+  }
+
   return (
-    <div className="border border-dashed border-border/80 rounded-[10px] bg-background overflow-hidden p-4 px-6 flex items-center justify-between group hover:border-border hover:bg-muted/30 transition-all cursor-pointer">
-      <div className="flex items-center gap-5">
-        <div className="size-11 rounded-[10px] flex items-center justify-center bg-muted/40 border border-border/50">
-          <Image
-            src="/codex logo.png"
-            alt="Codex logo"
-            width={22}
-            height={22}
-            className="h-[22px] w-[22px] object-contain"
-          />
+    <div className="border border-border/60 rounded-[10px] bg-background overflow-hidden">
+      <div className="p-4 px-6 flex flex-col gap-4">
+        <div className="flex items-start justify-between gap-5">
+          <div className="flex items-center gap-5">
+            <div className="size-11 rounded-[10px] flex items-center justify-center bg-muted/40 border border-border/50">
+              <Image
+                src="/codex logo.png"
+                alt="Codex logo"
+                width={22}
+                height={22}
+                className="h-[22px] w-[22px] object-contain"
+              />
+            </div>
+            <div className="flex flex-col">
+              <span className="text-[14px] font-semibold text-foreground tracking-tight">
+                Use Codex in ChatGPT
+              </span>
+              <span className="text-[13px] text-muted-foreground mt-0.5 max-w-xl leading-relaxed">
+                Codex access is managed in ChatGPT. Users connect GitHub to
+                ChatGPT there, then use this app to prepare issue context and
+                follow pull requests back through GitHub sync.
+              </span>
+            </div>
+          </div>
+          <div className="rounded-full border border-border/60 bg-muted/20 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+            Hosted in ChatGPT
+          </div>
         </div>
-        <div className="flex flex-col">
-          <span className="text-[14px] font-semibold text-foreground tracking-tight">
-            Connect Codex
-          </span>
-          <span className="text-[13px] text-muted-foreground mt-0.5 max-w-sm leading-relaxed">
-            Enable GPT-5.4 Codex for issue fixing and pull request workflows.
-          </span>
+
+        <div className="rounded-[12px] border border-border/60 bg-muted/10 p-4">
+          <div className="text-[12px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+            Recommended setup
+          </div>
+          <div className="mt-3 flex flex-col gap-2 text-[13px] leading-6 text-muted-foreground">
+            <p>1. Open ChatGPT and go to Settings, then Apps.</p>
+            <p>2. Connect GitHub in ChatGPT and approve the repositories Codex should use.</p>
+            <p>3. Open an issue in this app, use the Codex Agent tab, and launch the prepared brief into Codex.</p>
+          </div>
         </div>
-      </div>
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          className="pointer-events-none text-muted-foreground gap-1.5"
-        >
-          Connect <ArrowUpRight className="size-3.5" />
-        </Button>
+
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-[12px] text-muted-foreground leading-relaxed">
+            This app does not perform Codex OAuth directly and cannot verify ChatGPT GitHub access from here.
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleOpenGitHubSetup}
+              className="text-muted-foreground gap-1.5"
+            >
+              GitHub setup guide <ExternalLink className="size-3.5" />
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleOpenCodex}
+              className="gap-1.5 bg-foreground text-background hover:bg-foreground/90"
+            >
+              Open Codex <ArrowUpRight className="size-3.5" />
+            </Button>
+          </div>
+        </div>
       </div>
     </div>
   )

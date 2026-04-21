@@ -3,6 +3,10 @@ export {
   handleInstallationDeleted,
 } from "./installation";
 export {
+  handleOrganizationMemberAdded,
+  handleOrganizationMemberRemoved,
+} from "./organization";
+export {
   handleIssueOpened,
   handleIssueClosed,
   handleIssueEdited,

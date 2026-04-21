@@ -192,7 +192,15 @@ async function createCommentRecord(
   });
 
   const recipientIds = new Set<Id<"members">>();
-  if (args.issue?.assigneeId) recipientIds.add(args.issue.assigneeId);
+  for (const assigneeId of args.issue?.assigneeIds || []) {
+    recipientIds.add(assigneeId);
+  }
+  if (
+    args.issue?.assigneeId &&
+    !(args.issue.assigneeIds || []).includes(args.issue.assigneeId)
+  ) {
+    recipientIds.add(args.issue.assigneeId);
+  }
   if (args.issue?.creatorId) recipientIds.add(args.issue.creatorId);
   if (args.pullRequest?.authorMemberId) recipientIds.add(args.pullRequest.authorMemberId);
   if (parentComment?.authorMemberId) recipientIds.add(parentComment.authorMemberId);

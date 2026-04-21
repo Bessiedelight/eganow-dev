@@ -15,20 +15,23 @@ export default defineSchema({
     githubLogin: v.optional(v.string()),
     githubOrganizations: v.optional(v.array(v.string())),
   })
+    .index("by_githubLogin", ["githubLogin"])
     .index("email", ["email"])
     .index("phone", ["phone"]),
 
   // ─── Existing: GitHub App installations ──────────────────────
   githubInstallations: defineTable({
-    userId: v.id("users"),
+    userId: v.optional(v.id("users")),
     installationId: v.number(),
     accountLogin: v.string(),
     accountType: v.string(),
     accountAvatarUrl: v.optional(v.string()),
+    installedByGithubLogin: v.optional(v.string()),
     status: v.string(),
     installedAt: v.number(),
   })
     .index("by_userId", ["userId"])
+    .index("by_installedByGithubLogin", ["installedByGithubLogin"])
     .index("by_installationId", ["installationId"]),
 
   // ─── Organizations ──────────────────────────────────────────
@@ -50,7 +53,7 @@ export default defineSchema({
 
   // ─── Members (user ↔ organization mapping) ─────────────────
   members: defineTable({
-    userId: v.id("users"),
+    userId: v.optional(v.id("users")),
     organizationId: v.id("organizations"),
     role: v.union(
       v.literal("owner"),
@@ -71,6 +74,10 @@ export default defineSchema({
     .index("by_userId", ["userId"])
     .index("by_organizationId", ["organizationId"])
     .index("by_org_and_user", ["organizationId", "userId"])
+    .index("by_organizationId_and_githubUsername", [
+      "organizationId",
+      "githubUsername",
+    ])
     .index("by_githubUsername", ["githubUsername"]),
 
   // ─── Teams ──────────────────────────────────────────────────
@@ -169,6 +176,7 @@ export default defineSchema({
     teamId: v.optional(v.id("teams")),
     projectId: v.optional(v.id("projects")),
     assigneeId: v.optional(v.id("members")),
+    assigneeIds: v.optional(v.array(v.id("members"))),
     creatorId: v.id("members"),
     labelIds: v.optional(v.array(v.id("labels"))),
     parentIssueId: v.optional(v.id("issues")),

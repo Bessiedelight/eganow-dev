@@ -109,8 +109,10 @@ export const syncFromGitHub = mutation({
 
     const authorMember = await ctx.db
       .query("members")
-      .withIndex("by_githubUsername", (q) =>
-        q.eq("githubUsername", args.authorGithubUsername)
+      .withIndex("by_organizationId_and_githubUsername", (q) =>
+        q
+          .eq("organizationId", args.orgId)
+          .eq("githubUsername", args.authorGithubUsername.toLowerCase())
       )
       .first();
 

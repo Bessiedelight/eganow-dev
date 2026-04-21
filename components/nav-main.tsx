@@ -50,8 +50,14 @@ export function NavMain({
 function NavMainItem({ item }: { item: any }) {
   const pathname = usePathname()
 
-  const isDirectlyActive = item.url !== "#" && pathname === item.url
-  const childIsActive = item.items?.some((subItem: any) => subItem.url !== "#" && pathname === subItem.url)
+  const isUrlActive = (url: string) => {
+    if (url === "#") return false
+    if (url === "/dashboard") return pathname === "/dashboard"
+    return pathname === url || pathname.startsWith(url + "/")
+  }
+
+  const isDirectlyActive = isUrlActive(item.url)
+  const childIsActive = item.items?.some((subItem: any) => isUrlActive(subItem.url))
   const isItemActive = isDirectlyActive || childIsActive
 
   const [isOpen, setIsOpen] = React.useState(item.isActive || childIsActive || false)
@@ -167,7 +173,7 @@ function NavMainItem({ item }: { item: any }) {
         >
           <SidebarMenuSub className="mt-1">
             {item.items.map((subItem: any) => {
-              const isSubItemActive = subItem.url !== "#" && pathname === subItem.url;
+              const isSubItemActive = isUrlActive(subItem.url);
               return (
                 <SidebarMenuSubItem key={subItem.title}>
                   <SidebarMenuSubButton asChild isActive={isSubItemActive}>

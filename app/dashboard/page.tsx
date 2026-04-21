@@ -158,7 +158,7 @@ export default function Page() {
   React.useEffect(() => {
     if (rawNotifications !== undefined && !isFilterInitialized) {
       const hasUnread = rawNotifications.some(
-        (n) => !n.isRead && (!n.snoozedUntil || n.snoozedUntil <= Date.now())
+        (n) => n && !n.isRead && (!n.snoozedUntil || n.snoozedUntil <= Date.now())
       )
       if (!hasUnread) setFilter("all")
       setIsFilterInitialized(true)
@@ -168,8 +168,10 @@ export default function Page() {
   const notifications = React.useMemo(() => {
     if (!rawNotifications) return undefined;
     let filtered = rawNotifications
-      .map((n) => optimisticReadIds.includes(n._id) ? { ...n, isRead: true } : n)
+      .filter((n) => n !== null)
+      .map((n) => n && optimisticReadIds.includes(n._id) ? { ...n, isRead: true } : n)
       .filter(n => {
+      if (!n) return false;
       // Age limit filter
       const ageMs = Date.now() - n.createdAt;
       if (ageLimit === "last_24h" && ageMs > 24 * 60 * 60 * 1000) return false;
@@ -394,7 +396,7 @@ export default function Page() {
       await createThreadComment({
         issueId: threadIssueId || undefined,
         pullRequestId: threadPullRequestId || undefined,
-        parentCommentId: replyTargetId || undefined,
+        parentCommentId: (replyTargetId as any) || undefined,
         body: discussionBody.trim(),
         attachments: pendingAttachments.map((attachment) => ({
           storageId: attachment.storageId as any,
@@ -437,7 +439,7 @@ export default function Page() {
 
     return (
       <div key={comment._id} className={depth > 0 ? "ml-8 border-l border-border/50 pl-4" : ""}>
-        <div className="rounded-xl border border-border/60 bg-background p-3">
+        <div className="rounded-xl border border-border bg-background p-3">
           <div className="flex items-start gap-3">
             <Avatar className="mt-0.5 size-8 border bg-blue-100 text-blue-600 dark:bg-blue-900/30">
               <AvatarFallback className="text-[10px] font-bold">
@@ -472,7 +474,7 @@ export default function Page() {
                         href={attachment.url || "#"}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="block overflow-hidden rounded-lg border border-border/60 bg-muted/5"
+                        className="block overflow-hidden rounded-lg border border-border bg-muted/5"
                       >
                         <img
                           src={attachment.url || ""}
@@ -486,7 +488,7 @@ export default function Page() {
                         href={attachment.url || "#"}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="flex items-center gap-2 rounded-lg border border-border/60 bg-background px-3 py-2 text-[12px] text-foreground hover:bg-muted/20"
+                        className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2 text-[12px] text-foreground hover:bg-muted/20"
                       >
                         <Paperclip className="size-3.5 text-muted-foreground" />
                         <span className="truncate">{attachment.fileName}</span>
@@ -505,7 +507,7 @@ export default function Page() {
                     className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
                       reaction.reactedByMe
                         ? "border-[#5e6ad2]/25 bg-[#5e6ad2]/5 text-[#5e6ad2]"
-                        : "border-border/60 bg-background text-muted-foreground hover:bg-muted/20"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted/20"
                     }`}
                   >
                     <span>{reaction.emoji}</span>
@@ -604,12 +606,12 @@ export default function Page() {
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="text-xs">View options</TooltipContent>
                   </Tooltip>
-                  <PopoverContent align="end" className="w-[300px] p-0 shadow-lg rounded-xl overflow-hidden border-border/60">
+                  <PopoverContent align="end" className="w-[300px] p-0 shadow-lg rounded-xl overflow-hidden border-border bg-background">
                     <div className="flex flex-col group/pop text-[14px]">
                       <div className="flex items-center justify-between px-4 py-3">
                         <span className="text-secondary-foreground font-medium">Ordering</span>
                         <Select value={ordering} onValueChange={(val: any) => setOrdering(val)}>
-                          <SelectTrigger className="w-[130px] h-8 text-xs bg-transparent border-border/60 shadow-none">
+                          <SelectTrigger className="w-[130px] h-8 text-xs bg-transparent border-border shadow-none">
                             <SelectValue placeholder="Ordering" />
                           </SelectTrigger>
                           <SelectContent>
@@ -618,10 +620,10 @@ export default function Page() {
                           </SelectContent>
                         </Select>
                       </div>
-                      <div className="flex items-center justify-between px-4 py-3 border-t border-border/60">
+                      <div className="flex items-center justify-between px-4 py-3 border-t border-border">
                         <span className="text-secondary-foreground font-medium">Age Limit</span>
                         <Select value={ageLimit} onValueChange={(val: any) => setAgeLimit(val)}>
-                          <SelectTrigger className="w-[130px] h-8 text-xs bg-transparent border-border/60 shadow-none">
+                          <SelectTrigger className="w-[130px] h-8 text-xs bg-transparent border-border shadow-none">
                             <SelectValue placeholder="Age limit" />
                           </SelectTrigger>
                           <SelectContent>
@@ -632,7 +634,7 @@ export default function Page() {
                           </SelectContent>
                         </Select>
                       </div>
-                      <Separator className="bg-border/60" />
+                      <Separator className="bg-border" />
                       <div className="flex flex-col py-1">
                         <div 
                           className="flex items-center justify-between px-4 py-2 hover:bg-muted/40 cursor-pointer transition-colors"
@@ -650,12 +652,12 @@ export default function Page() {
 
             {/* Sub-header / Filters */}
             <div className="h-12 flex items-center justify-between px-4 border-b shrink-0 bg-background text-sm pb-1 pt-1 overflow-x-auto [&::-webkit-scrollbar]:hidden">
-              <div className="h-[28px] flex items-center bg-muted/40 p-0.5 rounded-[6px] border border-border/40 min-w-max">
+              <div className="h-[28px] flex items-center bg-muted/10 p-0.5 rounded-[6px] border border-border min-w-max">
                 {(["unread", "all", "mentions", "assigned", "review"] as const).map((f) => (
                   <button 
                     key={f}
                     onClick={() => handleFilterChange(f)}
-                    className={`px-3.5 h-full flex items-center justify-center text-[11.5px] font-medium rounded-[4px] transition-all flex-1 capitalize ${filter === f ? 'bg-background text-foreground border border-border/20 shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
+                    className={`px-3.5 h-full flex items-center justify-center text-[11.5px] font-medium rounded-[4px] transition-all flex-1 capitalize ${filter === f ? 'bg-background text-foreground border border-border shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
                   >
                     {f}
                   </button>
@@ -686,7 +688,7 @@ export default function Page() {
                       <div 
                         key={n._id} 
                         onClick={() => handleSelect(n)}
-                        className={`group/row flex items-start gap-3 px-5 py-3.5 border-b border-border/40 last:border-b-0 border-l-2 cursor-pointer transition-colors relative ${isActive ? 'bg-blue-50/20 dark:bg-blue-900/10 border-l-blue-500' : 'bg-muted/10 border-l-transparent hover:bg-muted/30'}`}
+                        className={`group/row flex items-start gap-3 px-5 py-3.5 border-b border-border last:border-b-0 border-l-2 cursor-pointer transition-colors relative ${isActive ? 'bg-blue-50/20 dark:bg-blue-900/10 border-l-blue-500' : 'bg-muted/5 border-l-transparent hover:bg-muted/20'}`}
                       >
                         {/* Unread indicator */}
                         <div className="absolute left-[3px] top-4">
@@ -709,7 +711,7 @@ export default function Page() {
                         </div>
 
                         {/* Hover actions */}
-                        <div className="absolute right-4 top-4 flex items-center gap-0.5 opacity-0 group-hover/row:opacity-100 transition-opacity bg-background shadow-sm rounded-md border border-border/60 p-0.5">
+                        <div className="absolute right-4 top-4 flex items-center gap-0.5 opacity-0 group-hover/row:opacity-100 transition-opacity bg-background shadow-sm rounded-md border border-border p-0.5">
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <Button 
@@ -766,11 +768,11 @@ export default function Page() {
                     <span className="text-foreground font-semibold truncate">{selected.title}</span>
                   </div>
                     <div className="flex items-center gap-2 shrink-0">
-                    <div className="flex items-center gap-1 mr-4 border-r border-border/40 pr-4">
+                    <div className="flex items-center gap-1 mr-4 border-r border-border pr-4">
                       <Button 
                         variant="outline" 
                         size="sm" 
-                        className="h-7 gap-1.5 text-[12px] shadow-none border-border/60 hover:bg-muted/50 rounded-md"
+                        className="h-7 gap-1.5 text-[12px] shadow-none border-border hover:bg-muted/50 rounded-md"
                         onClick={() => handleArchive(selected._id)}
                       >
                         <CheckCircle2 className="size-3.5" /> Done
@@ -780,7 +782,7 @@ export default function Page() {
                           <Button 
                             variant="outline" 
                             size="icon" 
-                            className="h-7 w-7 text-muted-foreground border-border/60 shadow-none hover:bg-muted/50"
+                            className="h-7 w-7 text-muted-foreground border-border shadow-none hover:bg-muted/50"
                             onClick={() => handleSnooze(selected._id)}
                           >
                             <Clock className="size-3.5" />
@@ -884,7 +886,7 @@ export default function Page() {
                       )}
 
                       <div className="py-8">
-                        <Separator className="bg-border/60" />
+                        <Separator className="bg-border" />
                       </div>
 
                       {/* Quick action area */}
@@ -895,7 +897,7 @@ export default function Page() {
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border/60"
+                              className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border"
                               onClick={() => router.push(selected.linkedEntity!.route!)}
                             >
                               <Link2 className="size-3.5" />
@@ -906,7 +908,7 @@ export default function Page() {
                             <Button
                               variant="outline"
                               size="sm"
-                              className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border/60"
+                              className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border"
                               onClick={() => router.push(selected.secondaryEntity!.route!)}
                             >
                               <GitPullRequest className="size-3.5" />
@@ -916,7 +918,7 @@ export default function Page() {
                           <Button
                             variant="outline"
                             size="sm"
-                            className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border/60"
+                            className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border"
                             onClick={() => handleArchive(selected._id)}
                           >
                             <CheckCircle2 className="size-3.5" />
@@ -925,7 +927,7 @@ export default function Page() {
                           <Button
                             variant="outline"
                             size="sm"
-                            className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border/60"
+                            className="h-8 gap-1.5 text-[13px] font-medium shadow-none border-border"
                             onClick={() => handleSnooze(selected._id)}
                           >
                             <Clock className="size-3.5" />
@@ -935,7 +937,7 @@ export default function Page() {
                       </div>
 
                       <div className="py-8">
-                        <Separator className="bg-border/60" />
+                        <Separator className="bg-border" />
                       </div>
 
                       <div className="mt-2">
@@ -957,7 +959,7 @@ export default function Page() {
                               <button
                                 type="button"
                                 onClick={() => setIsDiscussionExpanded((previous) => !previous)}
-                                className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted/20 hover:text-foreground"
+                                className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted/20 hover:text-foreground"
                               >
                                 {(discussionThread?.length || 0).toString()} messages
                                 <ChevronDown className={`size-3.5 transition-transform ${isDiscussionExpanded ? "rotate-180" : ""}`} />
@@ -969,13 +971,13 @@ export default function Page() {
                         {(threadIssueId || threadPullRequestId) ? (
                           <div className="space-y-5">
                             <div
-                              className="rounded-xl border border-border/60 bg-background p-3"
+                              className="rounded-xl border border-border bg-background dark:bg-muted/10 p-3"
                               onClick={() => {
                                 if (!isDiscussionExpanded) setIsDiscussionExpanded(true)
                               }}
                             >
                               {replyTarget && (
-                                <div className="mb-3 flex items-center justify-between rounded-lg border border-border/60 bg-muted/5 px-3 py-2">
+                                <div className="mb-3 flex items-center justify-between rounded-lg border border-border bg-muted/5 px-3 py-2">
                                   <div className="min-w-0">
                                     <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                                       Replying to {replyTarget.authorDisplayName}
@@ -998,7 +1000,7 @@ export default function Page() {
                                 onChange={(event) => setDiscussionBody(event.target.value)}
                                 onFocus={() => setIsDiscussionExpanded(true)}
                                 placeholder="Write a message, paste a link, or reply to the thread..."
-                                className="min-h-[72px] w-full resize-none rounded-lg border border-border/60 bg-background px-3 py-2.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
+                                className="min-h-[72px] w-full resize-none rounded-lg border border-border bg-background dark:bg-muted/20 px-3 py-2.5 text-[13px] text-foreground outline-none placeholder:text-muted-foreground"
                               />
 
                               {pendingAttachments.length > 0 && (
@@ -1006,7 +1008,7 @@ export default function Page() {
                                   {pendingAttachments.map((attachment) => (
                                     <div
                                       key={attachment.storageId}
-                                      className="flex items-center gap-2 rounded-full border border-border/60 bg-muted/5 px-3 py-1.5 text-[11px] text-foreground"
+                                      className="flex items-center gap-2 rounded-full border border-border bg-muted/5 px-3 py-1.5 text-[11px] text-foreground"
                                     >
                                       {attachment.contentType?.startsWith("image/") ? (
                                         <ImageIcon className="size-3.5 text-muted-foreground" />
@@ -1089,7 +1091,7 @@ export default function Page() {
                               style={{ display: "none" }}
                             >
                               {discussionThread === undefined ? (
-                                <div className="flex items-center justify-center rounded-xl border border-border/60 bg-background py-10">
+                                <div className="flex items-center justify-center rounded-xl border border-border bg-background py-10">
                                   <Loader2 className="size-5 animate-spin text-muted-foreground" />
                                 </div>
                               ) : discussionThread.length > 0 ? (
@@ -1097,8 +1099,8 @@ export default function Page() {
                                   {(threadByParent.get("root") || []).map((comment) => renderDiscussionNode(comment))}
                                 </div>
                               ) : (
-                                <div className="rounded-xl border border-dashed border-border/60 bg-background px-6 py-10 text-center">
-                                  <div className="mx-auto flex size-10 items-center justify-center rounded-full border border-border/60 bg-muted/5">
+                                <div className="rounded-xl border border-dashed border-border bg-background px-6 py-10 text-center">
+                                  <div className="mx-auto flex size-10 items-center justify-center rounded-full border border-border bg-muted/5">
                                     <MessageSquare className="size-4 text-muted-foreground" />
                                   </div>
                                   <div className="mt-3 text-[13px] font-medium text-foreground">No discussion yet</div>
@@ -1110,7 +1112,7 @@ export default function Page() {
                             </div>
 
                             {!isDiscussionExpanded && (
-                              <div className="rounded-xl border border-border/60 bg-muted/5 px-4 py-3 text-[12px] text-muted-foreground">
+                              <div className="rounded-xl border border-border bg-muted/5 px-4 py-3 text-[12px] text-muted-foreground">
                                 {discussionThread && discussionThread.length > 0 ? (
                                   <div className="flex items-center justify-between gap-3">
                                     <span className="truncate">
@@ -1141,7 +1143,7 @@ export default function Page() {
                             )}
                           </div>
                         ) : (
-                          <div className="rounded-xl border border-dashed border-border/60 bg-background px-6 py-10 text-center">
+                          <div className="rounded-xl border border-dashed border-border bg-background px-6 py-10 text-center">
                             <div className="text-[13px] font-medium text-foreground">Discussion appears for linked work</div>
                             <div className="mt-1 text-[12px] text-muted-foreground">
                               Open a notification tied to an issue or pull request to chat here.
@@ -1154,10 +1156,10 @@ export default function Page() {
                   </div>
 
                   {/* Right Column: Properties */}
-                  <div className="w-[300px] xl:w-[320px] overflow-y-auto p-6 shrink-0 [&::-webkit-scrollbar]:hidden border-l border-border/60 bg-background flex flex-col gap-6">
+                  <div className="w-[300px] xl:w-[320px] overflow-y-auto p-6 shrink-0 [&::-webkit-scrollbar]:hidden border-l border-border bg-background dark:bg-[#111113] flex flex-col gap-6">
 
                     {/* Metadata Section 1 */}
-                    <div className="bg-muted/30 rounded-xl p-4 flex flex-col gap-1">
+                    <div className="bg-muted/10 dark:bg-muted/20 border border-border rounded-xl p-4 flex flex-col gap-1">
                       
                       {/* Sender */}
                       <ReadOnlyPropertyRow label="Sender" value={
@@ -1205,7 +1207,7 @@ export default function Page() {
                     </div>
 
                     {/* Metadata Section 2 (Status) */}
-                    <div className="bg-muted/30 rounded-xl p-4 flex flex-col gap-1">
+                    <div className="bg-muted/10 dark:bg-muted/20 border border-border rounded-xl p-4 flex flex-col gap-1">
                       {/* Status */}
                       <ReadOnlyPropertyRow label="Status" value={
                         selected.isRead ? (

@@ -1,7 +1,50 @@
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type MutationCtx } from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import type { Doc } from "./_generated/dataModel";
+
+async function upsertInstallation(
+  ctx: MutationCtx,
+  args: {
+    userId?: Doc<"users">["_id"];
+    installationId: number;
+    accountLogin: string;
+    accountType: string;
+    accountAvatarUrl?: string;
+    installedByGithubLogin?: string;
+  }
+) {
+  const existing = await ctx.db
+    .query("githubInstallations")
+    .withIndex("by_installationId", (q) =>
+      q.eq("installationId", args.installationId)
+    )
+    .unique();
+
+  if (existing) {
+    await ctx.db.patch(existing._id, {
+      userId: args.userId ?? existing.userId,
+      accountLogin: args.accountLogin,
+      accountType: args.accountType,
+      accountAvatarUrl: args.accountAvatarUrl,
+      installedByGithubLogin:
+        args.installedByGithubLogin ?? existing.installedByGithubLogin,
+      status: "active",
+    });
+    return existing._id;
+  }
+
+  return await ctx.db.insert("githubInstallations", {
+    userId: args.userId,
+    installationId: args.installationId,
+    accountLogin: args.accountLogin,
+    accountType: args.accountType,
+    accountAvatarUrl: args.accountAvatarUrl,
+    installedByGithubLogin: args.installedByGithubLogin,
+    status: "active",
+    installedAt: Date.now(),
+  });
+}
 
 /**
  * Save a GitHub App installation linked to the current user.
@@ -16,35 +59,37 @@ export const saveInstallation = mutation({
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not authenticated");
+    const user = await ctx.db.get(userId);
 
-    // Check if this installation already exists
-    const existing = await ctx.db
-      .query("githubInstallations")
-      .withIndex("by_installationId", (q) =>
-        q.eq("installationId", args.installationId)
-      )
-      .unique();
-
-    if (existing) {
-      // Update existing installation
-      await ctx.db.patch(existing._id, {
-        accountLogin: args.accountLogin,
-        accountType: args.accountType,
-        accountAvatarUrl: args.accountAvatarUrl,
-        status: "active",
-      });
-      return existing._id;
-    }
-
-    // Create new installation record
-    return await ctx.db.insert("githubInstallations", {
+    return await upsertInstallation(ctx, {
       userId,
-      installationId: args.installationId,
-      accountLogin: args.accountLogin,
-      accountType: args.accountType,
-      accountAvatarUrl: args.accountAvatarUrl,
-      status: "active",
-      installedAt: Date.now(),
+      installedByGithubLogin: user?.githubLogin,
+      ...args,
+    });
+  },
+});
+
+export const saveInstallationFromWebhook = mutation({
+  args: {
+    installationId: v.number(),
+    accountLogin: v.string(),
+    accountType: v.string(),
+    accountAvatarUrl: v.optional(v.string()),
+    installedByGithubLogin: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const installerUser = args.installedByGithubLogin
+      ? await ctx.db
+          .query("users")
+          .withIndex("by_githubLogin", (q) =>
+            q.eq("githubLogin", args.installedByGithubLogin)
+          )
+          .first()
+      : null;
+
+    return await upsertInstallation(ctx, {
+      userId: installerUser?._id,
+      ...args,
     });
   },
 });
@@ -68,6 +113,24 @@ export const removeInstallation = mutation({
       .unique();
 
     if (installation && installation.userId === userId) {
+      await ctx.db.patch(installation._id, { status: "removed" });
+    }
+  },
+});
+
+export const removeInstallationFromWebhook = mutation({
+  args: {
+    installationId: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const installation = await ctx.db
+      .query("githubInstallations")
+      .withIndex("by_installationId", (q) =>
+        q.eq("installationId", args.installationId)
+      )
+      .unique();
+
+    if (installation) {
       await ctx.db.patch(installation._id, { status: "removed" });
     }
   },
@@ -115,16 +178,43 @@ export const getMyInstallations = query({
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) return [];
+    const user = await ctx.db.get(userId);
 
     const memberships = await ctx.db
       .query("members")
       .withIndex("by_userId", (q) => q.eq("userId", userId))
       .collect();
 
-    const activeMemberships = memberships.filter((m) => m.status === "active");
+    const membershipByOrgId = new Map(
+      memberships.map((membership) => [membership.organizationId, membership])
+    );
+
+    if (user?.githubLogin) {
+      const githubUsernameMemberships = await ctx.db
+        .query("members")
+        .withIndex("by_githubUsername", (q) =>
+          q.eq("githubUsername", user.githubLogin)
+        )
+        .collect();
+
+      for (const membership of githubUsernameMemberships) {
+        if (
+          membership.status === "active" ||
+          membership.status === "invited"
+        ) {
+          membershipByOrgId.set(membership.organizationId, membership);
+        }
+      }
+    }
+
+    const relevantMemberships = Array.from(membershipByOrgId.values()).filter(
+      (membership) =>
+        membership.status === "active" || membership.status === "invited"
+    );
+
     const organizations = (
       await Promise.all(
-        activeMemberships.map((membership) => ctx.db.get(membership.organizationId))
+        relevantMemberships.map((membership) => ctx.db.get(membership.organizationId))
       )
     ).filter((organization): organization is Doc<"organizations"> => organization !== null);
 

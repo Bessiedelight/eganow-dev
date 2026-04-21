@@ -63,6 +63,14 @@ export const syncFromGitHub = mutation({
   handler: async (ctx, args) => {
     const now = Date.now();
     const shortSha = args.sha.substring(0, 7);
+    const authorMember = await ctx.db
+      .query("members")
+      .withIndex("by_organizationId_and_githubUsername", (q) =>
+        q
+          .eq("organizationId", args.orgId)
+          .eq("githubUsername", args.authorGithubUsername.toLowerCase())
+      )
+      .first();
 
     // Check if commit already exists
     const existing = await ctx.db
@@ -91,7 +99,7 @@ export const syncFromGitHub = mutation({
       shortSha,
       message: args.message,
       authorGithubUsername: args.authorGithubUsername,
-      authorMemberId: undefined,
+      authorMemberId: authorMember?._id,
       additions: args.additions,
       deletions: args.deletions,
       changedFiles: args.changedFiles,

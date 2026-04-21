@@ -1312,6 +1312,8 @@ function DashboardTab({
 }
 
 function TraceabilityTab({ issues, prs, activity }: { issues: any[] | undefined; prs: any[] | undefined; activity: any[] | undefined }) {
+  const [showMinorActivity, setShowMinorActivity] = React.useState(false)
+
   // Build a unified timeline from real data
   const timeline = React.useMemo(() => {
     const events: { id: string; type: string; title: string; time: number; icon: string; detail?: any }[] = []
@@ -1327,14 +1329,16 @@ function TraceabilityTab({ issues, prs, activity }: { issues: any[] | undefined;
       }
     }
     if (activity) {
+      const minorTypes = ["comment_created", "comment_replied", "pull_request_linked_to_issue", "pull_request_project_changed"]
       for (const event of activity) {
+        if (!showMinorActivity && minorTypes.includes(event.eventType)) continue
         events.push({ id: `activity-${event._id}`, type: "activity", title: event.eventType?.replace(/_/g, " ") || "Event", time: event.createdAt, icon: "activity", detail: event })
       }
     }
 
     events.sort((a, b) => b.time - a.time)
     return events.slice(0, 30)
-  }, [issues, prs, activity])
+  }, [issues, prs, activity, showMinorActivity])
 
   // Build dependency traces: issues that have linked PRs
   const dependencies = React.useMemo(() => {
@@ -1365,9 +1369,20 @@ function TraceabilityTab({ issues, prs, activity }: { issues: any[] | undefined;
         <div className="max-w-[1000px] mx-auto w-full">
           <div className="flex items-center justify-between mb-8">
             <h2 className="text-[20px] font-semibold text-foreground tracking-tight">Project Timeline</h2>
-            <Button variant="outline" size="sm" className="h-8 text-[12px] font-medium border-border/60 gap-1.5">
-              <Filter className="size-3.5" /> Filter Events
-            </Button>
+            <div className="flex items-center gap-4">
+              <label className="flex items-center gap-2 text-[12px] font-medium text-muted-foreground mr-1 cursor-pointer hover:text-foreground transition-colors">
+                <input 
+                  type="checkbox" 
+                  checked={showMinorActivity} 
+                  onChange={(e) => setShowMinorActivity(e.target.checked)} 
+                  className="rounded border-border/60 bg-background accent-[#5e6ad2] size-3.5 cursor-pointer"
+                />
+                Show minor activity
+              </label>
+              <Button variant="outline" size="sm" className="h-8 text-[12px] font-medium border-border/60 gap-1.5">
+                <Filter className="size-3.5" /> Filter Events
+              </Button>
+            </div>
           </div>
 
           {timeline.length === 0 ? (

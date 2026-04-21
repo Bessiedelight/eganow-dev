@@ -10,7 +10,8 @@ export async function createGitHubIssue(
   repoFullName: string,
   title: string,
   body?: string,
-  labels?: string[]
+  labels?: string[],
+  assignees?: string[]
 ) {
   const [owner, repo] = repoFullName.split("/");
   const octokit = await getInstallationClient(installationId);
@@ -23,6 +24,7 @@ export async function createGitHubIssue(
       title,
       body: body || undefined,
       labels: labels || undefined,
+      assignees: assignees || undefined,
     }
   );
 

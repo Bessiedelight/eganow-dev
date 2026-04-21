@@ -2,52 +2,8 @@ import GitHub from "@auth/core/providers/github";
 import { convexAuth } from "@convex-dev/auth/server";
 import { internal } from "./_generated/api";
 
-const GITHUB_API_HEADERS = {
-  Accept: "application/vnd.github+json",
-  "User-Agent": "eganow-dev",
-  "X-GitHub-Api-Version": "2022-11-28",
-};
-
-async function fetchGitHubOrganizations(accessToken: string) {
-  const githubOrganizations: string[] = [];
-  let page = 1;
-
-  while (true) {
-    const response = await fetch(
-      `https://api.github.com/user/orgs?per_page=100&page=${page}`,
-      {
-        headers: {
-          ...GITHUB_API_HEADERS,
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(
-        `GitHub org membership lookup failed with status ${response.status}`
-      );
-    }
-
-    const organizations = (await response.json()) as Array<{
-      login?: string | null;
-    }>;
-
-    for (const organization of organizations) {
-      const login = organization.login?.trim();
-      if (login) {
-        githubOrganizations.push(login);
-      }
-    }
-
-    if (organizations.length < 100) {
-      break;
-    }
-
-    page += 1;
-  }
-
-  return Array.from(new Set(githubOrganizations));
+function normalizeGithubLogin(value: string) {
+  return value.trim().toLowerCase();
 }
 
 export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
@@ -55,26 +11,14 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
     GitHub({
       authorization: {
         params: {
-          scope: "read:user user:email read:org",
+          scope: "read:user user:email",
         },
       },
-      async profile(profile, tokens) {
+      async profile(profile) {
         const githubLogin =
-          typeof profile.login === "string" ? profile.login : undefined;
-
-        let githubOrganizations: string[] = [];
-        if (tokens.access_token) {
-          try {
-            githubOrganizations = await fetchGitHubOrganizations(
-              tokens.access_token
-            );
-          } catch (error) {
-            console.error(
-              "[Auth] Failed to fetch GitHub organizations during sign-in",
-              error
-            );
-          }
-        }
+          typeof profile.login === "string" && profile.login.trim().length > 0
+            ? normalizeGithubLogin(profile.login)
+            : undefined;
 
         return {
           id: profile.id.toString(),
@@ -89,7 +33,6 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
               ? profile.avatar_url
               : undefined,
           githubLogin,
-          githubOrganizations,
         };
       },
     }),
@@ -100,28 +43,20 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
         return;
       }
 
-      const githubOrganizations = Array.isArray(args.profile.githubOrganizations)
-        ? args.profile.githubOrganizations.filter(
-            (value): value is string =>
-              typeof value === "string" && value.trim().length > 0
-          )
-        : [];
-
-      if (githubOrganizations.length === 0) {
-        return;
-      }
-
       const githubLogin =
         typeof args.profile.githubLogin === "string" &&
         args.profile.githubLogin.trim().length > 0
           ? args.profile.githubLogin
           : undefined;
 
+      if (!githubLogin) {
+        return;
+      }
+
       await ctx.runMutation(
-        internal.organizations.syncMembershipsFromGithubOrganizationsInternal,
+        internal.organizations.claimMembershipsForGithubLoginInternal,
         {
           userId: args.userId,
-          githubOrganizations,
           githubLogin,
         }
       );

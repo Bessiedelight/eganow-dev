@@ -4,6 +4,7 @@ import * as React from "react"
 import { useRouter } from "next/navigation"
 import { useQuery, useMutation } from "convex/react"
 import { api } from "@/convex/_generated/api"
+import type { Id } from "@/convex/_generated/dataModel"
 import { useOrganization } from "@/hooks/use-organization"
 import { createGitHubComment, updateGitHubIssue } from "@/lib/github/actions"
 import { toast } from "sonner"
@@ -199,6 +200,16 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
     await handleUpdate("labelIds", newIds)
   }
 
+  const handleAssigneeToggle = async (memberId: Id<"members">) => {
+    if (!issue) return
+    const current: Id<"members">[] =
+      issue.assigneeIds || (issue.assigneeId ? [issue.assigneeId] : [])
+    const next = current.includes(memberId)
+      ? current.filter((id) => id !== memberId)
+      : [...current, memberId]
+    await handleUpdate("assigneeIds", next, next.length > 0 ? "Assignees updated" : "Assignees cleared")
+  }
+
   React.useEffect(() => {
     if (!issue || !issueThread?.latestTimestamp) return
     void markIssueThreadSeen({
@@ -238,6 +249,9 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
   const pc = priorityOptions.find(p => p.value === issue.priority) || priorityOptions[0]
   const StatusIcon = sc.icon
   const displayId = issue.identifier.startsWith("#") ? issue.identifier : `#${issue.sequenceNumber}`
+  const assigneeIds: Id<"members">[] =
+    issue.assigneeIds || (issue.assigneeId ? [issue.assigneeId] : [])
+  const assignees = issue.assignees || (issue.assignee ? [issue.assignee] : [])
 
   return (
     <SidebarProvider>
@@ -269,7 +283,7 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
                 onClick={() => setActiveView((current) => (current === "ai-chat" ? "details" : "ai-chat"))}
               >
                 <Bot className="size-3.5" />
-                Codex Agent
+                Claude Code Agent
               </Button>
               <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 rounded-full text-muted-foreground border-border/60"><Link2 className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">Copy link</TooltipContent></Tooltip>
               <Tooltip><TooltipTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 rounded-full text-muted-foreground border-border/60"><Copy className="size-3.5" /></Button></TooltipTrigger><TooltipContent side="bottom" className="text-xs">Copy ID</TooltipContent></Tooltip>
@@ -287,6 +301,15 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
                 <IssueAiChatTab
                   issueTitle={issue.title}
                   issueIdentifier={displayId}
+                  issueBody={issue.body}
+                  issueGithubNumber={issue.githubIssueNumber}
+                  issueGithubUrl={issue.githubUrl}
+                  issueGithubRepoFullName={issue.githubRepoFullName}
+                  projectName={issue.project?.name}
+                  projectGithubRepoFullNames={issue.project?.githubRepoFullNames}
+                  organizationHasGitHubInstallation={Boolean(
+                    organization?.githubInstallationId
+                  )}
                   chatInput={issueChatInput}
                   setChatInput={setIssueChatInput}
                 />
@@ -575,7 +598,7 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
 
             {/* RIGHT: Properties Sidebar */}
             <div className="w-[300px] xl:w-[320px] overflow-y-auto p-6 shrink-0 [&::-webkit-scrollbar]:hidden border-l border-border/60 bg-background flex flex-col gap-6">
-              <div className="flex flex-col gap-1 bg-muted/30 p-4 rounded-xl">
+              <div className="bg-muted/10 dark:bg-muted/20 border border-border rounded-xl p-4 flex flex-col gap-1">
 
                 {/* Status */}
                 <EditablePropertyRow label="State" icon={CircleDot}>
@@ -601,23 +624,52 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <button className="flex items-center gap-1.5 text-foreground hover:bg-muted/40 px-2 py-0.5 rounded-md transition-colors -mx-2 cursor-pointer">
-                        {issue.assignee ? (
-                          <><Avatar className="size-[18px] border bg-orange-100 text-orange-600"><AvatarFallback className="text-[8px] font-bold">{getInitials(issue.assignee.displayName)}</AvatarFallback></Avatar> {issue.assignee.displayName}</>
+                        {assignees.length > 0 ? (
+                          <>
+                            <div className="flex items-center">
+                              {assignees.slice(0, 2).map((assignee: any, index: number) => (
+                                <Avatar
+                                  key={assignee._id}
+                                  className={`size-[18px] border bg-orange-100 text-orange-600 ${index > 0 ? "-ml-1.5" : ""}`}
+                                >
+                                  <AvatarFallback className="text-[8px] font-bold">
+                                    {getInitials(assignee.displayName)}
+                                  </AvatarFallback>
+                                </Avatar>
+                              ))}
+                            </div>
+                            {assignees.length === 1
+                              ? assignees[0].displayName
+                              : `${assignees.length} assignees`}
+                          </>
                         ) : <span className="text-muted-foreground">Unassigned</span>}
                       </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" className="w-[200px] p-1">
-                      <DropdownMenuItem onClick={() => handleUpdate("assigneeId", undefined)} className="py-1.5 px-2 flex items-center gap-2 text-[12px] text-muted-foreground">
+                      <DropdownMenuItem
+                        onSelect={(e) => {
+                          e.preventDefault()
+                          void handleUpdate("assigneeIds", [], "Assignees cleared")
+                        }}
+                        className="py-1.5 px-2 flex items-center gap-2 text-[12px] text-muted-foreground"
+                      >
                         <User className="size-3.5" /> Unassigned
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       {(members || []).map(m => (
-                        <DropdownMenuItem key={m._id} onClick={() => handleUpdate("assigneeId", m._id, `Assigned to ${m.displayName}`)} className="py-1.5 px-2 flex items-center justify-between text-[12px]">
+                        <DropdownMenuItem
+                          key={m._id}
+                          onSelect={(e) => {
+                            e.preventDefault()
+                            void handleAssigneeToggle(m._id)
+                          }}
+                          className="py-1.5 px-2 flex items-center justify-between text-[12px]"
+                        >
                           <div className="flex items-center gap-2">
                             <Avatar className="size-5"><AvatarFallback className="text-[8px] bg-blue-500/10 text-blue-600">{getInitials(m.displayName)}</AvatarFallback></Avatar>
                             {m.displayName}
                           </div>
-                          {issue.assigneeId === m._id && <Check className="size-3" />}
+                          {assigneeIds.includes(m._id) && <Check className="size-3" />}
                         </DropdownMenuItem>
                       ))}
                     </DropdownMenuContent>

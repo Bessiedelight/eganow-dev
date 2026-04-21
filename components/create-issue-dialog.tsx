@@ -91,7 +91,7 @@ export function CreateIssueDialog({
   const [body, setBody] = React.useState("")
   const [status, setStatus] = React.useState<IssueStatus>("todo")
   const [priority, setPriority] = React.useState<IssuePriority>("none")
-  const [assigneeId, setAssigneeId] = React.useState<string | undefined>()
+  const [selectedAssigneeIds, setSelectedAssigneeIds] = React.useState<string[]>([])
   const [selectedLabelIds, setSelectedLabelIds] = React.useState<string[]>([])
   const [selectedRepoFullName, setSelectedRepoFullName] = React.useState<string | undefined>()
   const [selectedTeamId, setSelectedTeamId] = React.useState<string | undefined>()
@@ -150,7 +150,7 @@ export function CreateIssueDialog({
     setBody("")
     setStatus("todo")
     setPriority("none")
-    setAssigneeId(undefined)
+    setSelectedAssigneeIds([])
     setSelectedLabelIds([])
     setSelectedRepoFullName(undefined)
     setSelectedTeamId(undefined)
@@ -161,6 +161,14 @@ export function CreateIssueDialog({
     if (!open) return
     setSelectedProjectId((current) => current ?? defaultProjectId)
   }, [open, defaultProjectId])
+
+  const toggleAssignee = React.useCallback((memberId: string) => {
+    setSelectedAssigneeIds((current) =>
+      current.includes(memberId)
+        ? current.filter((id) => id !== memberId)
+        : [...current, memberId]
+    )
+  }, [])
 
   const toggleRecording = async () => {
     if (isRecording) {
@@ -270,7 +278,8 @@ export function CreateIssueDialog({
         body: body.trim() || undefined,
         status,
         priority,
-        assigneeId: assigneeId as any,
+        assigneeIds:
+          selectedAssigneeIds.length > 0 ? (selectedAssigneeIds as any) : undefined,
         labelIds: selectedLabelIds.length > 0 ? selectedLabelIds as any : undefined,
         teamId: selectedTeamId as any,
         projectId: selectedProjectId as any,
@@ -283,13 +292,17 @@ export function CreateIssueDialog({
           const labelNames = labels
             ?.filter((l) => selectedLabelIds.includes(l._id))
             .map((l) => l.name)
+          const assigneeUsernames = selectedAssignees
+            .map((assignee) => assignee.githubUsername)
+            .filter((username): username is string => !!username)
 
           const ghResult = await createGitHubIssue(
             installationId,
             selectedRepoFullName,
             title.trim(),
             body.trim() || undefined,
-            labelNames
+            labelNames,
+            assigneeUsernames
           )
 
           await linkToGitHub({
@@ -323,7 +336,8 @@ export function CreateIssueDialog({
 
   const currentStatus = statusOptions.find((s) => s.value === status) || statusOptions[0]
   const currentPriority = priorityOptions.find((p) => p.value === priority) || priorityOptions[0]
-  const selectedAssignee = members?.find((m) => m._id === assigneeId)
+  const selectedAssignees =
+    members?.filter((m) => selectedAssigneeIds.includes(m._id)) || []
   const selectedTeam = teams?.find((t) => t._id === selectedTeamId)
 
   const labelColorMap: Record<string, string> = {
@@ -458,13 +472,26 @@ export function CreateIssueDialog({
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-border/60 text-[11.5px] font-medium text-foreground cursor-pointer hover:bg-muted/50 transition-colors bg-background">
-                {selectedAssignee ? (
+                {selectedAssignees.length > 0 ? (
                   <>
-                    <Avatar className="size-[16px]"><AvatarFallback className="text-[7px] font-bold bg-orange-500/10 text-orange-600">{getInitials(selectedAssignee.displayName)}</AvatarFallback></Avatar>
-                    {selectedAssignee.displayName}
+                    <div className="flex items-center">
+                      {selectedAssignees.slice(0, 2).map((assignee, index) => (
+                        <Avatar
+                          key={assignee._id}
+                          className={`size-[16px] border border-background ${index > 0 ? "-ml-1.5" : ""}`}
+                        >
+                          <AvatarFallback className="text-[7px] font-bold bg-orange-500/10 text-orange-600">
+                            {getInitials(assignee.displayName)}
+                          </AvatarFallback>
+                        </Avatar>
+                      ))}
+                    </div>
+                    {selectedAssignees.length === 1
+                      ? selectedAssignees[0].displayName
+                      : `${selectedAssignees.length} assignees`}
                   </>
                 ) : (
-                  <><User className="size-3.5 text-muted-foreground" /> Assignee</>
+                  <><User className="size-3.5 text-muted-foreground" /> Assignees</>
                 )}
               </div>
             </DropdownMenuTrigger>
@@ -474,16 +501,29 @@ export function CreateIssueDialog({
                 <span className="text-[10px] bg-muted/60 px-1 py-0.5 rounded text-foreground">A</span>
               </div>
               <DropdownMenuSeparator className="my-1 bg-border/40" />
-              <DropdownMenuItem onClick={() => setAssigneeId(undefined)} className="py-1.5 px-2 flex items-center gap-2 cursor-pointer focus:bg-muted/60 text-[12px] text-muted-foreground">
+              <DropdownMenuItem
+                onSelect={(e) => {
+                  e.preventDefault()
+                  setSelectedAssigneeIds([])
+                }}
+                className="py-1.5 px-2 flex items-center gap-2 cursor-pointer focus:bg-muted/60 text-[12px] text-muted-foreground"
+              >
                 <User className="size-3.5" /> Unassigned
               </DropdownMenuItem>
               {(members || []).map((m) => (
-                <DropdownMenuItem key={m._id} onClick={() => setAssigneeId(m._id)} className="py-1.5 px-2 flex items-center justify-between cursor-pointer focus:bg-muted/60 text-[12px]">
+                <DropdownMenuItem
+                  key={m._id}
+                  onSelect={(e) => {
+                    e.preventDefault()
+                    toggleAssignee(m._id)
+                  }}
+                  className="py-1.5 px-2 flex items-center justify-between cursor-pointer focus:bg-muted/60 text-[12px]"
+                >
                   <div className="flex items-center gap-2">
                     <Avatar className="size-5"><AvatarFallback className="text-[8px] bg-blue-500/10 text-blue-600">{getInitials(m.displayName)}</AvatarFallback></Avatar>
                     {m.displayName}
                   </div>
-                  {assigneeId === m._id && <Check className="size-3 text-foreground" />}
+                  {selectedAssigneeIds.includes(m._id) && <Check className="size-3 text-foreground" />}
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>

@@ -2,6 +2,8 @@ import { Webhooks } from "@octokit/webhooks";
 import {
   handleInstallationCreated,
   handleInstallationDeleted,
+  handleOrganizationMemberAdded,
+  handleOrganizationMemberRemoved,
   handleIssueOpened,
   handleIssueClosed,
   handleIssueEdited,
@@ -47,6 +49,8 @@ export function getWebhooks(): Webhooks {
   // ─── Installation ──────────────────────────────────────────
   _webhooks.on("installation.created", handleInstallationCreated);
   _webhooks.on("installation.deleted", handleInstallationDeleted);
+  _webhooks.on("organization.member_added", handleOrganizationMemberAdded);
+  _webhooks.on("organization.member_removed", handleOrganizationMemberRemoved);
 
   // ─── Issues ────────────────────────────────────────────────
   _webhooks.on("issues.opened", handleIssueOpened);

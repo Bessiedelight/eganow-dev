@@ -1,4 +1,43 @@
 import type { EmitterWebhookEvent } from "@octokit/webhooks";
+import { getConvexClient } from "@/lib/convex-server";
+import { getInstallationClient } from "@/lib/github/client";
+import { api } from "@/convex/_generated/api";
+
+async function fetchOrganizationMemberUsernames(
+  installationId: number,
+  accountLogin: string,
+  accountType: string
+) {
+  if (accountType !== "Organization") {
+    return [];
+  }
+
+  const octokit = await getInstallationClient(installationId);
+  const usernames: string[] = [];
+  let page = 1;
+
+  while (true) {
+    const { data } = await octokit.request("GET /orgs/{org}/members", {
+      org: accountLogin,
+      per_page: 100,
+      page,
+    });
+
+    const batch = data
+      .map((member: { login?: string }) => member.login?.trim().toLowerCase())
+      .filter((value): value is string => Boolean(value));
+
+    usernames.push(...batch);
+
+    if (data.length < 100) {
+      break;
+    }
+
+    page += 1;
+  }
+
+  return Array.from(new Set(usernames));
+}
 
 /**
  * Handles GitHub App installation events.
@@ -13,22 +52,43 @@ export async function handleInstallationCreated(
   const account = installation.account;
   const accountLogin =
     account && "login" in account ? account.login : "unknown";
+  const accountAvatarUrl =
+    account && "avatar_url" in account ? account.avatar_url : undefined;
+  const installedByGithubLogin = sender.login?.trim().toLowerCase();
 
   console.log(
-    `[GitHub App] ✅ Installed on "${accountLogin}" ` +
+    `[GitHub App] Installed on "${accountLogin}" ` +
       `(ID: ${installation.id}) by ${sender.login}`
   );
-  console.log(
-    `[GitHub App]    Target type: ${installation.target_type}`
-  );
 
-  // TODO: Persist installation to Convex
-  // await convexClient.mutation(api.github.saveInstallation, {
-  //   installationId: installation.id,
-  //   accountLogin,
-  //   accountType: installation.target_type,
-  //   senderLogin: sender.login,
-  // });
+  const convex = getConvexClient();
+
+  try {
+    await convex.mutation(api.github.saveInstallationFromWebhook, {
+      installationId: installation.id,
+      accountLogin,
+      accountType: installation.target_type,
+      accountAvatarUrl,
+      installedByGithubLogin,
+    });
+
+    const memberUsernames = await fetchOrganizationMemberUsernames(
+      installation.id,
+      accountLogin,
+      installation.target_type
+    );
+
+    await convex.mutation(api.organizations.syncInstallationRosterFromWebhook, {
+      installationId: installation.id,
+      accountLogin,
+      accountType: installation.target_type,
+      accountAvatarUrl,
+      installedByGithubLogin,
+      memberUsernames,
+    });
+  } catch (error) {
+    console.error("[GitHub App] Failed to persist installation webhook:", error);
+  }
 }
 
 export async function handleInstallationDeleted(
@@ -40,12 +100,17 @@ export async function handleInstallationDeleted(
     account && "login" in account ? account.login : "unknown";
 
   console.log(
-    `[GitHub App] ❌ Uninstalled from "${accountLogin}" ` +
+    `[GitHub App] Uninstalled from "${accountLogin}" ` +
       `(ID: ${installation.id}) by ${sender.login}`
   );
 
-  // TODO: Remove installation from Convex
-  // await convexClient.mutation(api.github.removeInstallation, {
-  //   installationId: installation.id,
-  // });
+  const convex = getConvexClient();
+
+  try {
+    await convex.mutation(api.github.removeInstallationFromWebhook, {
+      installationId: installation.id,
+    });
+  } catch (error) {
+    console.error("[GitHub App] Failed to remove installation webhook:", error);
+  }
 }

@@ -146,6 +146,7 @@ export default function UserIssuesPage() {
           ? getInitials(issue.assignee.displayName)
           : undefined,
         assigneeName: issue.assignee?.displayName,
+        assigneeCount: issue.assignees?.length || (issue.assignee ? 1 : 0),
         teamName: issue.team
           ? `${issue.team.name}${issue.team.identifier ? ` (${issue.team.identifier})` : ""}`
           : undefined,
@@ -407,9 +408,16 @@ export default function UserIssuesPage() {
                               <Tooltip>
                                 <TooltipTrigger asChild>
                                   {issue.assignee ? (
-                                    <Avatar className="size-[20px] border">
-                                      <AvatarFallback className="text-[8px] font-bold bg-muted/60 text-muted-foreground">{issue.assignee}</AvatarFallback>
-                                    </Avatar>
+                                    <div className="relative">
+                                      <Avatar className="size-[20px] border">
+                                        <AvatarFallback className="text-[8px] font-bold bg-muted/60 text-muted-foreground">{issue.assignee}</AvatarFallback>
+                                      </Avatar>
+                                      {issue.assigneeCount > 1 && (
+                                        <div className="absolute -bottom-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-background bg-foreground px-1 text-[8px] font-semibold text-background">
+                                          +{issue.assigneeCount - 1}
+                                        </div>
+                                      )}
+                                    </div>
                                   ) : (
                                     <div className="size-[20px] flex items-center justify-center rounded-full border border-dashed border-muted-foreground/40 text-muted-foreground/40">
                                       <Users className="size-3" />
@@ -418,7 +426,9 @@ export default function UserIssuesPage() {
                                 </TooltipTrigger>
                                 <TooltipContent side="top" className="text-xs">
                                   {issue.assigneeName
-                                    ? `Assigned to ${issue.assigneeName}`
+                                    ? issue.assigneeCount > 1
+                                      ? `Assigned to ${issue.assigneeName} and ${issue.assigneeCount - 1} more`
+                                      : `Assigned to ${issue.assigneeName}`
                                     : issue.teamName
                                       ? `Assigned to team ${issue.teamName}`
                                       : "Unassigned"}

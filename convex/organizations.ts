@@ -8,24 +8,48 @@ import {
 import { getAuthUserId } from "@convex-dev/auth/server";
 import type { Doc, Id } from "./_generated/dataModel";
 
+type InstallationSeed = Pick<
+  Doc<"githubInstallations">,
+  | "installationId"
+  | "accountLogin"
+  | "accountType"
+  | "accountAvatarUrl"
+  | "userId"
+  | "installedByGithubLogin"
+>;
+
 function githubUsernameForInstallation(
   accountType: string,
   accountLogin: string
 ) {
-  return accountType === "User" ? accountLogin : undefined;
+  return accountType === "User" ? normalizeGithubIdentity(accountLogin) : undefined;
 }
 
-function normalizeGithubLogin(value: string) {
+function normalizeGithubIdentity(value: string) {
   return value.trim().toLowerCase();
 }
 
 function githubLoginToSlug(value: string) {
-  return normalizeGithubLogin(value).replace(/[^a-z0-9-]/g, "-");
+  return normalizeGithubIdentity(value).replace(/[^a-z0-9-]/g, "-");
+}
+
+async function getUserByGithubLogin(
+  ctx: MutationCtx,
+  githubLogin?: string
+) {
+  if (!githubLogin) return null;
+
+  return await ctx.db
+    .query("users")
+    .withIndex("by_githubLogin", (q) =>
+      q.eq("githubLogin", normalizeGithubIdentity(githubLogin))
+    )
+    .first();
 }
 
 async function createOrganizationForInstallation(
   ctx: MutationCtx,
-  installation: Doc<"githubInstallations">,
+  installation: InstallationSeed,
   ownerUserId: Id<"users">
 ) {
   const now = Date.now();
@@ -83,141 +107,226 @@ async function createOrganizationForInstallation(
   return orgId;
 }
 
-async function syncMembershipsForGithubOrganizations(
+async function getOrCreateOrganizationForInstallation(
   ctx: MutationCtx,
-  userId: Id<"users">,
-  githubOrganizations: string[],
-  memberGithubUsername?: string
+  installation: InstallationSeed,
+  ownerUserId?: Id<"users">
 ) {
-  const normalizedGithubOrganizations = Array.from(
+  const existing = await ctx.db
+    .query("organizations")
+    .withIndex("by_githubInstallationId", (q) =>
+      q.eq("githubInstallationId", installation.installationId)
+    )
+    .first();
+
+  if (existing) {
+    return existing;
+  }
+
+  const existingByGithubAccountLogin = await ctx.db
+    .query("organizations")
+    .withIndex("by_githubAccountLogin", (q) =>
+      q.eq("githubAccountLogin", installation.accountLogin)
+    )
+    .first();
+
+  if (existingByGithubAccountLogin) {
+    await ctx.db.patch(existingByGithubAccountLogin._id, {
+      name: installation.accountLogin,
+      slug: githubLoginToSlug(installation.accountLogin),
+      avatarUrl: installation.accountAvatarUrl,
+      githubInstallationId: installation.installationId,
+      githubAccountLogin: installation.accountLogin,
+      githubAccountType: installation.accountType,
+    });
+
+    return {
+      ...existingByGithubAccountLogin,
+      name: installation.accountLogin,
+      slug: githubLoginToSlug(installation.accountLogin),
+      avatarUrl: installation.accountAvatarUrl,
+      githubInstallationId: installation.installationId,
+      githubAccountLogin: installation.accountLogin,
+      githubAccountType: installation.accountType,
+    };
+  }
+
+  if (!ownerUserId) {
+    return null;
+  }
+
+  const orgId = await createOrganizationForInstallation(ctx, installation, ownerUserId);
+  return await ctx.db.get(orgId);
+}
+
+async function syncRosterMembers(
+  ctx: MutationCtx,
+  organizationId: Id<"organizations">,
+  githubUsernames: string[]
+) {
+  const now = Date.now();
+  const normalizedUsernames = Array.from(
     new Set(
-      githubOrganizations
-        .map((value) => normalizeGithubLogin(value))
+      githubUsernames
+        .map((value) => normalizeGithubIdentity(value))
         .filter(Boolean)
     )
   );
 
-  if (normalizedGithubOrganizations.length === 0) {
-    return [];
-  }
+  for (const githubUsername of normalizedUsernames) {
+    const existingMembership = await ctx.db
+      .query("members")
+      .withIndex("by_organizationId_and_githubUsername", (q) =>
+        q.eq("organizationId", organizationId).eq("githubUsername", githubUsername)
+      )
+      .first();
 
-  const organizations = await ctx.db.query("organizations").collect();
-  const activeInstallations = (
-    await ctx.db.query("githubInstallations").collect()
-  ).filter((installation) => installation.status === "active");
-
-  const joinedOrganizationIds: Id<"organizations">[] = [];
-
-  for (const normalizedLogin of normalizedGithubOrganizations) {
-    let organization =
-      organizations.find(
-        (candidate) =>
-          normalizeGithubLogin(candidate.githubAccountLogin) === normalizedLogin
-      ) ??
-      organizations.find(
-        (candidate) => candidate.slug === githubLoginToSlug(normalizedLogin)
-      ) ??
-      null;
-
-    if (!organization) {
-      const installation =
-        activeInstallations.find(
-          (candidate) =>
-            normalizeGithubLogin(candidate.accountLogin) === normalizedLogin
-        ) ?? null;
-
-      if (installation) {
-        const existingOrganization = await ctx.db
-          .query("organizations")
-          .withIndex("by_githubInstallationId", (q) =>
-            q.eq("githubInstallationId", installation.installationId)
-          )
-          .first();
-
-        if (existingOrganization) {
-          organization = existingOrganization;
-        } else {
-          const organizationId = await createOrganizationForInstallation(
-            ctx,
-            installation,
-            installation.userId
-          );
-          const createdOrganization = await ctx.db.get(organizationId);
-          if (createdOrganization) {
-            organizations.push(createdOrganization);
-            organization = createdOrganization;
-          }
-        }
+    if (existingMembership) {
+      if (
+        existingMembership.githubUsername !== githubUsername ||
+        existingMembership.displayName !== githubUsername ||
+        (existingMembership.userId === undefined &&
+          existingMembership.status !== "invited")
+      ) {
+        await ctx.db.patch(existingMembership._id, {
+          githubUsername,
+          displayName: existingMembership.userId
+            ? existingMembership.displayName
+            : githubUsername,
+          status: existingMembership.userId ? "active" : "invited",
+        });
       }
-    }
-
-    if (!organization) {
       continue;
     }
 
-    await ensureActiveMembership(
-      ctx,
-      userId,
-      organization._id,
-      {
-        accountLogin: organization.githubAccountLogin,
-        accountType: organization.githubAccountType,
-        accountAvatarUrl: organization.avatarUrl,
-      },
-      memberGithubUsername
-    );
-
-    joinedOrganizationIds.push(organization._id);
+    await ctx.db.insert("members", {
+      userId: undefined,
+      organizationId,
+      role: "member",
+      displayName: githubUsername,
+      githubUsername,
+      status: "invited",
+      joinedAt: now,
+    });
   }
-
-  return joinedOrganizationIds;
 }
 
-async function ensureActiveMembership(
+async function upsertRosterMember(
   ctx: MutationCtx,
-  userId: Awaited<ReturnType<typeof getAuthUserId>>,
+  organizationId: Id<"organizations">,
+  githubUsername: string
+) {
+  const normalizedGithubUsername = normalizeGithubIdentity(githubUsername);
+
+  const existingMembership = await ctx.db
+    .query("members")
+    .withIndex("by_organizationId_and_githubUsername", (q) =>
+      q
+        .eq("organizationId", organizationId)
+        .eq("githubUsername", normalizedGithubUsername)
+    )
+    .first();
+
+  if (existingMembership) {
+    await ctx.db.patch(existingMembership._id, {
+      githubUsername: normalizedGithubUsername,
+      displayName: existingMembership.userId
+        ? existingMembership.displayName
+        : normalizedGithubUsername,
+      status: existingMembership.userId ? "active" : "invited",
+    });
+    return existingMembership._id;
+  }
+
+  return await ctx.db.insert("members", {
+    userId: undefined,
+    organizationId,
+    role: "member",
+    displayName: normalizedGithubUsername,
+    githubUsername: normalizedGithubUsername,
+    status: "invited",
+    joinedAt: Date.now(),
+  });
+}
+
+async function deactivateRosterMember(
+  ctx: MutationCtx,
+  organizationId: Id<"organizations">,
+  githubUsername: string
+) {
+  const normalizedGithubUsername = normalizeGithubIdentity(githubUsername);
+
+  const existingMembership = await ctx.db
+    .query("members")
+    .withIndex("by_organizationId_and_githubUsername", (q) =>
+      q
+        .eq("organizationId", organizationId)
+        .eq("githubUsername", normalizedGithubUsername)
+    )
+    .first();
+
+  if (!existingMembership) {
+    return null;
+  }
+
+  await ctx.db.patch(existingMembership._id, {
+    status: "deactivated",
+  });
+
+  return existingMembership._id;
+}
+
+async function ensureClaimedMembership(
+  ctx: MutationCtx,
+  userId: Id<"users">,
   organizationId: Id<"organizations">,
   installation: {
     accountLogin: string;
     accountType: string;
     accountAvatarUrl?: string;
   },
-  memberGithubUsername?: string
+  memberGithubUsername?: string,
+  role: "owner" | "admin" | "member" | "viewer" = "member"
 ) {
-  if (!userId) {
-    throw new Error("Not authenticated");
-  }
+  const normalizedGithubUsername = memberGithubUsername
+    ? normalizeGithubIdentity(memberGithubUsername)
+    : githubUsernameForInstallation(
+        installation.accountType,
+        installation.accountLogin
+      );
 
-  const existingMembership = await ctx.db
+  const existingMembershipByUser = await ctx.db
     .query("members")
     .withIndex("by_org_and_user", (q) =>
       q.eq("organizationId", organizationId).eq("userId", userId)
     )
     .first();
 
+  const claimedMembership =
+    !existingMembershipByUser && normalizedGithubUsername
+      ? await ctx.db
+          .query("members")
+          .withIndex("by_organizationId_and_githubUsername", (q) =>
+            q
+              .eq("organizationId", organizationId)
+              .eq("githubUsername", normalizedGithubUsername)
+          )
+          .first()
+      : null;
+
+  const existingMembership = existingMembershipByUser ?? claimedMembership;
   const user = await ctx.db.get(userId);
   const displayName = user?.name || user?.email || installation.accountLogin;
-  const githubUsername =
-    memberGithubUsername ??
-    githubUsernameForInstallation(
-      installation.accountType,
-      installation.accountLogin
-    );
 
   if (existingMembership) {
-    if (
-      existingMembership.status !== "active" ||
-      existingMembership.displayName !== displayName ||
-      existingMembership.githubUsername !== githubUsername ||
-      existingMembership.githubAvatarUrl !== installation.accountAvatarUrl
-    ) {
-      await ctx.db.patch(existingMembership._id, {
-        status: "active",
-        displayName: displayName as string,
-        githubUsername,
-        githubAvatarUrl: installation.accountAvatarUrl,
-      });
-    }
+    await ctx.db.patch(existingMembership._id, {
+      userId,
+      role: existingMembership.role === "owner" ? "owner" : role,
+      displayName: displayName as string,
+      githubUsername: normalizedGithubUsername,
+      githubAvatarUrl: installation.accountAvatarUrl,
+      status: "active",
+    });
 
     return existingMembership._id;
   }
@@ -225,13 +334,74 @@ async function ensureActiveMembership(
   return await ctx.db.insert("members", {
     userId,
     organizationId,
-    role: "member",
+    role,
     displayName: displayName as string,
-    githubUsername,
+    githubUsername: normalizedGithubUsername,
     githubAvatarUrl: installation.accountAvatarUrl,
     status: "active",
     joinedAt: Date.now(),
   });
+}
+
+async function claimMembershipsForGithubLogin(
+  ctx: MutationCtx,
+  userId: Id<"users">,
+  githubLogin: string
+) {
+  const normalizedGithubLogin = normalizeGithubIdentity(githubLogin);
+  const user = await ctx.db.get(userId);
+  const installations = await ctx.db
+    .query("githubInstallations")
+    .withIndex("by_installedByGithubLogin", (q) =>
+      q.eq("installedByGithubLogin", normalizedGithubLogin)
+    )
+    .collect();
+
+  for (const installation of installations.filter(
+    (candidate) => candidate.status === "active"
+  )) {
+    const organization = await getOrCreateOrganizationForInstallation(
+      ctx,
+      installation,
+      userId
+    );
+
+    if (!organization) continue;
+
+    await ensureClaimedMembership(
+      ctx,
+      userId,
+      organization._id,
+      installation,
+      normalizedGithubLogin,
+      "owner"
+    );
+  }
+
+  const pendingMemberships = await ctx.db
+    .query("members")
+    .withIndex("by_githubUsername", (q) => q.eq("githubUsername", normalizedGithubLogin))
+    .collect();
+
+  const claimedOrganizationIds: Id<"organizations">[] = [];
+
+  for (const membership of pendingMemberships) {
+    await ensureClaimedMembership(
+      ctx,
+      userId,
+      membership.organizationId,
+      {
+        accountLogin: user?.githubLogin || membership.displayName,
+        accountType: "User",
+        accountAvatarUrl: user?.image,
+      },
+      normalizedGithubLogin
+    );
+
+    claimedOrganizationIds.push(membership.organizationId);
+  }
+
+  return Array.from(new Set(claimedOrganizationIds));
 }
 
 /**
@@ -269,11 +439,11 @@ export const getById = query({
 
 /**
  * Bootstrap: Create or join an organization from a GitHub installation.
- * The installation is shared at the org level; users are attached as members.
  */
 export const bootstrapFromInstallation = mutation({
   args: {
     installationId: v.number(),
+    memberUsernames: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -290,52 +460,142 @@ export const bootstrapFromInstallation = mutation({
       return null;
     }
 
-    const existingOrg = await ctx.db
-      .query("organizations")
-      .withIndex("by_githubInstallationId", (q) =>
-        q.eq("githubInstallationId", installation.installationId)
-      )
-      .first();
+    const user = await ctx.db.get(userId);
 
-    if (existingOrg) {
-      const user = await ctx.db.get(userId);
-      await ensureActiveMembership(
-        ctx,
+    if (installation.userId !== userId || installation.installedByGithubLogin !== user?.githubLogin) {
+      await ctx.db.patch(installation._id, {
         userId,
-        existingOrg._id,
-        installation,
-        user?.githubLogin
-      );
-
-      return existingOrg._id;
+        installedByGithubLogin: user?.githubLogin,
+      });
     }
-
-    const orgId = await createOrganizationForInstallation(
+    const organization = await getOrCreateOrganizationForInstallation(
       ctx,
       installation,
       userId
     );
-    return orgId;
+
+    if (!organization) {
+      return null;
+    }
+
+    await ensureClaimedMembership(
+      ctx,
+      userId,
+      organization._id,
+      installation,
+      user?.githubLogin,
+      "owner"
+    );
+
+    if (args.memberUsernames && args.memberUsernames.length > 0) {
+      await syncRosterMembers(ctx, organization._id, args.memberUsernames);
+    }
+
+    return organization._id;
   },
 });
 
-export const syncMembershipsFromGithubOrganizationsInternal = internalMutation({
+export const syncInstallationRosterFromWebhook = mutation({
   args: {
-    userId: v.id("users"),
-    githubOrganizations: v.array(v.string()),
-    githubLogin: v.optional(v.string()),
+    installationId: v.number(),
+    accountLogin: v.string(),
+    accountType: v.string(),
+    accountAvatarUrl: v.optional(v.string()),
+    installedByGithubLogin: v.optional(v.string()),
+    memberUsernames: v.array(v.string()),
   },
   handler: async (ctx, args) => {
-    return await syncMembershipsForGithubOrganizations(
+    const installation = await ctx.db
+      .query("githubInstallations")
+      .withIndex("by_installationId", (q) =>
+        q.eq("installationId", args.installationId)
+      )
+      .first();
+
+    if (!installation) {
+      return null;
+    }
+
+    const installerUser = await getUserByGithubLogin(ctx, args.installedByGithubLogin);
+    const organization = await getOrCreateOrganizationForInstallation(
       ctx,
-      args.userId,
-      args.githubOrganizations,
-      args.githubLogin
+      {
+        ...installation,
+        accountLogin: args.accountLogin,
+        accountType: args.accountType,
+        accountAvatarUrl: args.accountAvatarUrl,
+        installedByGithubLogin: args.installedByGithubLogin,
+      },
+      installerUser?._id ?? installation.userId ?? undefined
+    );
+
+    if (!organization) {
+      return null;
+    }
+
+    if (installerUser?._id) {
+      await ensureClaimedMembership(
+        ctx,
+        installerUser._id,
+        organization._id,
+        installation,
+        installerUser.githubLogin,
+        "owner"
+      );
+    }
+
+    await syncRosterMembers(ctx, organization._id, args.memberUsernames);
+    return organization._id;
+  },
+});
+
+export const addRosterMemberFromWebhook = mutation({
+  args: {
+    installationId: v.number(),
+    githubUsername: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const organization = await ctx.db
+      .query("organizations")
+      .withIndex("by_githubInstallationId", (q) =>
+        q.eq("githubInstallationId", args.installationId)
+      )
+      .first();
+
+    if (!organization) {
+      return null;
+    }
+
+    return await upsertRosterMember(ctx, organization._id, args.githubUsername);
+  },
+});
+
+export const removeRosterMemberFromWebhook = mutation({
+  args: {
+    installationId: v.number(),
+    githubUsername: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const organization = await ctx.db
+      .query("organizations")
+      .withIndex("by_githubInstallationId", (q) =>
+        q.eq("githubInstallationId", args.installationId)
+      )
+      .first();
+
+    if (!organization) {
+      return null;
+    }
+
+    return await deactivateRosterMember(
+      ctx,
+      organization._id,
+      args.githubUsername
     );
   },
 });
 
-export const syncCurrentUserGithubOrganizations = mutation({
+export const claimCurrentUserMemberships = mutation({
   args: {},
   handler: async (ctx) => {
     const userId = await getAuthUserId(ctx);
@@ -344,26 +604,26 @@ export const syncCurrentUserGithubOrganizations = mutation({
     }
 
     const user = await ctx.db.get(userId);
-    if (!user) {
+    const githubLogin = user?.githubLogin;
+
+    if (!githubLogin) {
       return [];
     }
 
-    const githubOrganizations = Array.isArray(user.githubOrganizations)
-      ? user.githubOrganizations.filter(
-          (value): value is string =>
-            typeof value === "string" && value.trim().length > 0
-        )
-      : [];
+    return await claimMembershipsForGithubLogin(ctx, userId, githubLogin);
+  },
+});
 
-    if (githubOrganizations.length === 0) {
-      return [];
-    }
-
-    return await syncMembershipsForGithubOrganizations(
+export const claimMembershipsForGithubLoginInternal = internalMutation({
+  args: {
+    userId: v.id("users"),
+    githubLogin: v.string(),
+  },
+  handler: async (ctx, args) => {
+    return await claimMembershipsForGithubLogin(
       ctx,
-      userId,
-      githubOrganizations,
-      user.githubLogin
+      args.userId,
+      args.githubLogin
     );
   },
 });

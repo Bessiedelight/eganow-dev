@@ -20,8 +20,9 @@ import {
 import {
   Inbox, AlertCircle, Users, FolderKanban, CalendarClock, Settings2, GitPullRequest,
   Code2, Layers, Headset, HardDrive, Palette, Car, Globe, Shield, Zap, Bug, Rocket,
-  Database, Cpu, Wifi, Smartphone, Monitor, Lock, Settings, Star, Heart
+  Database, Cpu, Wifi, Smartphone, Monitor, Lock, Settings, Star, Heart, Sun, Moon
 } from "lucide-react"
+import { useTheme } from "next-themes"
 
 const TEAM_ICON_MAP: Record<string, { icon: any; color: string }> = {
   Code2: { icon: Code2, color: "text-blue-500" },
@@ -46,16 +47,21 @@ const TEAM_ICON_MAP: Record<string, { icon: any; color: string }> = {
   Heart: { icon: Heart, color: "text-pink-500" },
 }
 
-const data = {
-  user: {
-    name: "shadcn",
-    email: "m@example.com",
-    avatar: "/avatars/shadcn.jpg",
-  },
-}
+
 
 export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
   const { organization } = useOrganization()
+  const userStore = useQuery(api.users.current)
+  const { theme, setTheme } = useTheme()
+  const [mounted, setMounted] = React.useState(false)
+
+  React.useEffect(() => setMounted(true), [])
+
+  const userData = {
+    name: userStore?.name || "Loading...",
+    email: userStore?.email || "",
+    avatar: userStore?.image || "",
+  }
 
   const myTeams = useQuery(
     api.teams.listMyTeams,
@@ -148,7 +154,27 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
         ))}
       </SidebarContent>
       <SidebarFooter>
-        <NavUser user={data.user} />
+        <div className="flex flex-col gap-1.5 px-0.5">
+          { mounted && (
+            <div className="flex items-center justify-between px-2.5 pb-1 pt-1 opacity-70 hover:opacity-100 transition-opacity">
+              <div className="flex items-center bg-muted/60 border border-border/50 rounded-full p-[3px]">
+                <button 
+                  onClick={() => setTheme("light")} 
+                  className={`size-[22px] rounded-full flex items-center justify-center transition-colors ${theme === 'light' ? 'bg-background shadow-[0_1px_2px_rgba(0,0,0,0.1)] text-foreground border border-border/40' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  <Sun className="size-3" strokeWidth={2.5} />
+                </button>
+                <button 
+                  onClick={() => setTheme("dark")} 
+                  className={`size-[22px] rounded-full flex items-center justify-center transition-colors ${theme === 'dark' ? 'bg-background shadow-[0_1px_2px_rgba(0,0,0,0.1)] text-foreground border border-border/40' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  <Moon className="size-3" strokeWidth={2.5} />
+                </button>
+              </div>
+            </div>
+          )}
+          <NavUser user={userData} />
+        </div>
       </SidebarFooter>
     </Sidebar>
   )

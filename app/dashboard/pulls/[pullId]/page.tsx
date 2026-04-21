@@ -1191,7 +1191,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
                     </a>
                   </div>
                 </div>
-                <div className="bg-muted/30 rounded-xl p-4 flex flex-col gap-1">
+                <div className="bg-muted/10 dark:bg-muted/20 border border-border rounded-xl p-4 flex flex-col gap-1">
                   <ReadOnlyPropertyRow label="State" value={<span className="font-semibold text-sky-600">No pull request yet</span>} icon={GitBranch} iconColor="text-sky-500" />
                   <ReadOnlyPropertyRow label="Author" value={<span>{branchAuthor}</span>} icon={User} />
                   <ReadOnlyPropertyRow label="Base" value={<span className="font-mono text-[11px] bg-muted/40 px-1.5 py-0.5 rounded border border-border/40">{branchDetail.baseBranch}</span>} icon={GitMerge} />
@@ -1766,7 +1766,7 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
               </div>
 
               {/* Editable + Read-only Properties */}
-              <div className="bg-muted/30 rounded-xl p-4 flex flex-col gap-1">
+              <div className="bg-muted/10 dark:bg-muted/20 border border-border rounded-xl p-4 flex flex-col gap-1">
 
                 {/* State (read-only — GitHub-controlled) */}
                 <ReadOnlyPropertyRow label="State" value={

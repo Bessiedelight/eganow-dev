@@ -31,13 +31,13 @@ export function IssueAiChatTab({
             <div className="mt-8 text-center">
               <div className="inline-flex items-center gap-2 rounded-full border border-border/50 bg-muted/[0.05] px-3 py-1 text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
                 <Bot className="size-3.5" />
-                Codex Agent
+                Claude Code (Opus 4.6)
               </div>
               <h2 className="mt-5 text-3xl font-semibold tracking-tight text-foreground sm:text-4xl">
-                Codex Agent
+                Claude Code (Opus 4.6)
               </h2>
               <p className="mx-auto mt-3 max-w-xl text-[15px] leading-7 text-muted-foreground">
-                Powered by GPT-5.4 Codex to fix this GitHub issue and prepare a pull request.
+                Powered by Claude Code to fix this GitHub issue and prepare a pull request.
               </p>
               <p className="mx-auto mt-2 max-w-2xl text-[13px] leading-6 text-muted-foreground/80">
                 {issueIdentifier} · {issueTitle}
@@ -55,7 +55,7 @@ export function IssueAiChatTab({
                 value={chatInput}
                 onChange={(event) => setChatInput(event.target.value)}
                 minHeight={68}
-                placeholder="Tell Codex Agent what you want changed..."
+                placeholder="Tell Claude Code (Opus 4.6) what you want changed..."
                 className="w-full resize-none border-none bg-transparent px-1 text-[13px] leading-6 text-foreground outline-none placeholder:text-muted-foreground/60"
               />
             </div>
@@ -71,7 +71,7 @@ export function IssueAiChatTab({
                   <Plus className="size-3.5" />
                 </Button>
                 <div className="rounded-full border border-border/50 bg-background/80 px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
-                  Codex Agent
+                  Claude Code (Opus 4.6)
                 </div>
                 <div className="hidden rounded-full border border-border/50 bg-background/80 px-2.5 py-1 text-[11px] font-medium text-muted-foreground sm:block">
                   UI preview
