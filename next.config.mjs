@@ -1,7 +1,8 @@
-import type { NextConfig } from "next";
+// next.config.mjs
 
-const nextConfig: NextConfig = {
-  turbopack: {}, // Add this for Next.js 16
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+  turbopack: {},
 
   images: {
     remotePatterns: [{ hostname: "images.pexels.com" }],
