@@ -1,19 +1,16 @@
-// next.config.mjs
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  turbopack: {},
+  turbopack: {
+    root: rootDir,
+  },
 
   images: {
     remotePatterns: [{ hostname: "images.pexels.com" }],
-  },
-
-  typescript: {
-    ignoreBuildErrors: true,
-  },
-
-  eslint: {
-    ignoreDuringBuilds: true,
   },
 
   experimental: {

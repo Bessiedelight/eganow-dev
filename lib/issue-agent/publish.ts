@@ -61,9 +61,15 @@ async function appendPublishMessage(
 export async function publishIssueAgentPullRequest(args: PublishArgs) {
   const context = await loadContext(args.convex, args.sessionId);
   const workspace = context.workspace;
+  const { worktreePath, baseBranch, branchName } = workspace;
+  const repoFullName = context.session.repoFullName;
+  const installationId = context.session.githubInstallationId;
 
-  if (!workspace.worktreePath) {
+  if (!worktreePath) {
     throw new Error("Worktree is not ready yet");
+  }
+  if (!baseBranch || !branchName || !repoFullName || typeof installationId !== "number") {
+    throw new Error("Issue agent session is missing repository context");
   }
 
   await args.convex.mutation(internal.issueAgents.updateSessionFromWorker, {
@@ -72,11 +78,8 @@ export async function publishIssueAgentPullRequest(args: PublishArgs) {
     lastError: null,
   });
 
-  const changedFiles = await listChangedFiles(workspace.worktreePath);
-  const aheadCount = await listAheadCommitCount(
-    workspace.worktreePath,
-    workspace.baseBranch
-  );
+  const changedFiles = await listChangedFiles(worktreePath);
+  const aheadCount = await listAheadCommitCount(worktreePath, baseBranch);
 
   if (changedFiles.length === 0 && aheadCount === 0) {
     await appendPublishMessage(
@@ -93,29 +96,25 @@ export async function publishIssueAgentPullRequest(args: PublishArgs) {
 
   if (changedFiles.length > 0) {
     const commitMessage = `${context.issue.identifier}: ${context.issue.title}`;
-    await commitAllChanges(workspace.worktreePath, commitMessage);
+    await commitAllChanges(worktreePath, commitMessage);
   }
 
-  await pushBranch(
-    workspace.worktreePath,
-    workspace.branchName,
-    context.session.githubInstallationId
-  );
+  await pushBranch(worktreePath, branchName, installationId);
 
   const title = `${context.issue.identifier}: ${context.issue.title}`;
   const body = buildPullRequestBody(context);
   const pullRequest = await createGitHubPullRequest(
-    context.session.githubInstallationId,
-    context.session.repoFullName,
+    installationId,
+    repoFullName,
     title,
     body,
-    workspace.branchName,
-    workspace.baseBranch
+    branchName,
+    baseBranch
   );
 
   const pullRequestDetail = await fetchPullRequestDetail(
-    context.session.githubInstallationId,
-    context.session.repoFullName,
+    installationId,
+    repoFullName,
     pullRequest.githubPrNumber
   );
   const linkedPullRequestId = await args.convex.mutation(api.pullRequests.syncFromGitHub, {

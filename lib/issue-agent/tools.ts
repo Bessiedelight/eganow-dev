@@ -1,5 +1,4 @@
 import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
 
 import { internal } from "../../convex/_generated/api.js";
 import type { ConvexWorkerClient } from "../convex-server.ts";
@@ -41,7 +40,7 @@ export function createIssueAgentMcpServer({
       tool(
         "eganow_get_issue_context",
         "Get the canonical issue and session context from Eganow before planning or making changes.",
-        z.object({}),
+        {},
         async () => ({
           content: [
             {
@@ -67,7 +66,7 @@ export function createIssueAgentMcpServer({
       tool(
         "eganow_get_repo_context",
         "Get repository-level context Eganow already knows about, including branches and linked pull requests.",
-        z.object({}),
+        {},
         async () => ({
           content: [
             {
@@ -88,7 +87,7 @@ export function createIssueAgentMcpServer({
       tool(
         "eganow_publish_pull_request",
         "Request publication of the current branch as a pull request through Eganow's controlled GitHub App flow. Use this only when code changes are complete and the user wants a PR.",
-        z.object({}),
+        {},
         async () => {
           await convex.mutation(internal.issueAgents.requestPublishApprovalFromWorker, {
             sessionId: context.session._id,

@@ -3,6 +3,10 @@
   "version": "0.0.1",
   "type": "module",
   "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "node scripts/run-app-with-worker.mjs dev",
     "dev:app": "next dev --turbopack",

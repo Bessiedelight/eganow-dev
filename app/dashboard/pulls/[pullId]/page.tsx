@@ -160,6 +160,8 @@ function BranchDetailView({ pullIdRaw, organization, router }: { pullIdRaw: stri
           orgId: organization._id,
           githubRepoFullName: branchRepo,
           githubPrNumber: result.number,
+          githubPrId: result.githubPrId,
+          githubUrl: result.githubUrl,
           title: result.title,
           state: result.isDraft ? "open" : "open",
           isDraft: result.isDraft,
@@ -169,8 +171,6 @@ function BranchDetailView({ pullIdRaw, organization, router }: { pullIdRaw: stri
           additions: comparison?.files?.reduce((s: number, f: any) => s + (f.additions || 0), 0) || 0,
           deletions: comparison?.files?.reduce((s: number, f: any) => s + (f.deletions || 0), 0) || 0,
           changedFiles: comparison?.files?.length || 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
         })
       } catch { /* non-blocking */ }
 
@@ -457,6 +457,10 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
   const aiChatMessages = useQuery(
     api.aiReviews.getChatMessages,
     aiReview?._id ? { reviewId: aiReview._id } : "skip"
+  )
+  const reviewChatMessages = aiChatMessages ?? []
+  const isReviewResponding = Boolean(
+    aiReview && aiReview.step !== "completed" && aiReview.step !== "failed"
   )
   const triggerReview = useMutation(api.aiReviews.triggerReview)
   const sendChatMessage = useMutation(api.aiReviews.sendChatMessage)
@@ -777,25 +781,25 @@ export default function GitPullDetailPage({ params }: { params: Promise<{ pullId
                 {/* Panel 3: AI Review */}
                 <div className="w-1/3 h-full overflow-y-auto flex flex-col">
                   <div className="flex-1 px-6 py-6 space-y-4 overflow-y-auto">
-                    {chatMessages.length === 0 && (
+                    {reviewChatMessages.length === 0 && (
                       <div className="flex flex-col items-center justify-center h-full text-muted-foreground">
                         <Bot className="size-10 mb-3 opacity-20" />
-                        <p className="text-[14px] font-medium">AI Commit Review</p>
-                        <p className="text-[12px] mt-1 opacity-60">Ask the AI to review this commit</p>
+                        <p className="text-[14px] font-medium">AI Review Chat</p>
+                        <p className="text-[12px] mt-1 opacity-60">Ask a follow-up question about this review</p>
                       </div>
                     )}
-                    {chatMessages.map((m, i) => (
+                    {reviewChatMessages.map((m, i) => (
                       <div key={i} className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}>
                         <div className={`max-w-[85%] p-3 rounded-xl text-[13px] ${m.role === "user" ? "bg-[#5e6ad2] text-white" : "bg-muted/40 border border-border/40"}`}>
-                          {m.text}
+                          {m.content}
                         </div>
                       </div>
                     ))}
-                    {isTyping && <div className="flex gap-1 px-3 py-2"><span className="size-2 bg-muted-foreground/40 rounded-full animate-bounce [animation-delay:-0.3s]" /><span className="size-2 bg-muted-foreground/40 rounded-full animate-bounce [animation-delay:-0.15s]" /><span className="size-2 bg-muted-foreground/40 rounded-full animate-bounce" /></div>}
+                    {isReviewResponding && <div className="flex gap-1 px-3 py-2"><span className="size-2 bg-muted-foreground/40 rounded-full animate-bounce [animation-delay:-0.3s]" /><span className="size-2 bg-muted-foreground/40 rounded-full animate-bounce [animation-delay:-0.15s]" /><span className="size-2 bg-muted-foreground/40 rounded-full animate-bounce" /></div>}
                   </div>
                   <div className="p-4 border-t border-border/40 bg-muted/5">
                     <div className="flex items-center gap-2">
-                      <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && handleSendChat()} placeholder="Ask AI about this commit..." className="flex-1 bg-muted/20 border border-border/40 rounded-lg px-3 py-2 text-[13px] outline-none focus:border-[#5e6ad2]/40" />
+                      <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && handleSendChat()} placeholder="Ask a follow-up question..." className="flex-1 bg-muted/20 border border-border/40 rounded-lg px-3 py-2 text-[13px] outline-none focus:border-[#5e6ad2]/40" />
                       <Button size="sm" onClick={handleSendChat} className="h-8 bg-[#5e6ad2] hover:bg-[#5e6ad2]/90 text-white"><ArrowUpCircle className="size-4" /></Button>
                     </div>
                   </div>
