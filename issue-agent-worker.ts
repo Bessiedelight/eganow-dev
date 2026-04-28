@@ -38,6 +38,20 @@ function loadLocalEnv() {
   loadEnvFile(path.join(cwd, ".env.local"));
 }
 
+function envFlag(name: string) {
+  const value = process.env[name]?.trim().toLowerCase();
+  if (!value) return undefined;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return undefined;
+}
+
+function hasConvexAdminAuth() {
+  return Boolean(
+    process.env.CONVEX_DEPLOY_KEY?.trim() || process.env.CONVEX_ADMIN_KEY?.trim()
+  );
+}
+
 async function main() {
   loadLocalEnv();
   const once = process.argv.includes("--once");
@@ -45,6 +59,15 @@ async function main() {
   const pollIntervalMs = pollArg
     ? Number.parseInt(pollArg.slice("--poll=".length), 10)
     : undefined;
+  const allowUnauthenticatedFallback = envFlag("ISSUE_AGENT_ALLOW_CLI_FALLBACK") === true;
+  const inProduction = process.env.NODE_ENV === "production";
+
+  if (inProduction && !hasConvexAdminAuth() && !allowUnauthenticatedFallback) {
+    console.warn(
+      "Issue agent worker skipped in production because CONVEX_DEPLOY_KEY / CONVEX_ADMIN_KEY is not set and CLI fallback is not available on hosted deployments."
+    );
+    return;
+  }
 
   await runIssueAgentWorker({
     once,
