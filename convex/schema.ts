@@ -383,7 +383,8 @@ export default defineSchema({
   })
     .index("by_issueId", ["issueId", "createdAt"])
     .index("by_pullRequestId", ["pullRequestId", "createdAt"])
-    .index("by_organizationId", ["organizationId", "createdAt"]),
+    .index("by_organizationId", ["organizationId", "createdAt"])
+    .index("by_actorMemberId", ["actorMemberId", "createdAt"]),
 
   // ─── Notifications ─────────────────────────────────────────
   notifications: defineTable({
@@ -652,4 +653,155 @@ export default defineSchema({
   })
     .index("by_memberId_and_issueId", ["memberId", "issueId"])
     .index("by_issueId", ["issueId"]),
+
+  issueLinks: defineTable({
+    issueId: v.id("issues"),
+    label: v.optional(v.string()),
+    url: v.string(),
+    createdAt: v.number(),
+  }).index("by_issueId", ["issueId"]),
+
+  issueFiles: defineTable({
+    issueId: v.id("issues"),
+    storageId: v.id("_storage"),
+    fileName: v.string(),
+    contentType: v.optional(v.string()),
+    size: v.optional(v.number()),
+    createdAt: v.number(),
+  }).index("by_issueId", ["issueId"]),
+
+  issueAgentSessions: defineTable({
+    organizationId: v.id("organizations"),
+    issueId: v.id("issues"),
+    memberId: v.id("members"),
+    provider: v.literal("anthropic"),
+    sdk: v.literal("claude-agent-sdk"),
+    githubInstallationId: v.number(),
+    repoFullName: v.string(),
+    baseBranch: v.optional(v.string()),
+    branchName: v.string(),
+    workspaceKey: v.string(),
+    claudeSessionId: v.optional(v.string()),
+    status: v.union(
+      v.literal("starting"),
+      v.literal("active"),
+      v.literal("waiting_for_user"),
+      v.literal("waiting_for_approval"),
+      v.literal("publishing"),
+      v.literal("completed"),
+      v.literal("failed"),
+      v.literal("closed")
+    ),
+    lastActivityAt: v.number(),
+    latestUserMessageAt: v.optional(v.number()),
+    latestAssistantMessageAt: v.optional(v.number()),
+    lastError: v.optional(v.string()),
+    linkedPullRequestId: v.optional(v.id("pullRequests")),
+    githubPrNumber: v.optional(v.number()),
+    githubPrUrl: v.optional(v.string()),
+    usageSummary: v.optional(v.any()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    closedAt: v.optional(v.number()),
+  })
+    .index("by_issueId_and_createdAt", ["issueId", "createdAt"])
+    .index("by_memberId_and_createdAt", ["memberId", "createdAt"]),
+
+  issueAgentMessages: defineTable({
+    sessionId: v.id("issueAgentSessions"),
+    issueId: v.id("issues"),
+    organizationId: v.id("organizations"),
+    role: v.union(
+      v.literal("user"),
+      v.literal("assistant"),
+      v.literal("system"),
+      v.literal("tool")
+    ),
+    messageType: v.union(
+      v.literal("chat"),
+      v.literal("tool_call"),
+      v.literal("tool_result"),
+      v.literal("status"),
+      v.literal("approval_request"),
+      v.literal("approval_result"),
+      v.literal("question"),
+      v.literal("publish_event"),
+      v.literal("error")
+    ),
+    content: v.string(),
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index("by_sessionId_and_createdAt", ["sessionId", "createdAt"])
+    .index("by_issueId_and_createdAt", ["issueId", "createdAt"]),
+
+  issueAgentApprovals: defineTable({
+    sessionId: v.id("issueAgentSessions"),
+    toolName: v.string(),
+    toolInput: v.optional(v.any()),
+    reason: v.optional(v.string()),
+    status: v.union(
+      v.literal("pending"),
+      v.literal("approved"),
+      v.literal("denied"),
+      v.literal("expired")
+    ),
+    decision: v.optional(v.string()),
+    createdAt: v.number(),
+    resolvedAt: v.optional(v.number()),
+    resolvedBy: v.optional(v.id("members")),
+  }).index("by_sessionId_and_createdAt", ["sessionId", "createdAt"]),
+
+  issueAgentWorkspaces: defineTable({
+    sessionId: v.id("issueAgentSessions"),
+    provider: v.literal("filesystem_git_worktree"),
+    workspaceKey: v.string(),
+    repoFullName: v.string(),
+    baseBranch: v.optional(v.string()),
+    branchName: v.string(),
+    worktreePath: v.optional(v.string()),
+    claudeSessionPath: v.optional(v.string()),
+    worktreeCreated: v.boolean(),
+    isTopLevelSession: v.boolean(),
+    status: v.union(
+      v.literal("provisioning"),
+      v.literal("ready"),
+      v.literal("busy"),
+      v.literal("failed"),
+      v.literal("expired"),
+      v.literal("cleaned_up")
+    ),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    expiresAt: v.optional(v.number()),
+    lastHealthyAt: v.optional(v.number()),
+  })
+    .index("by_sessionId", ["sessionId"])
+    .index("by_workspaceKey", ["workspaceKey"]),
+
+  issueAgentTasks: defineTable({
+    sessionId: v.id("issueAgentSessions"),
+    issueId: v.id("issues"),
+    organizationId: v.id("organizations"),
+    memberId: v.id("members"),
+    taskType: v.union(v.literal("turn"), v.literal("publish")),
+    prompt: v.optional(v.string()),
+    status: v.union(
+      v.literal("queued"),
+      v.literal("running"),
+      v.literal("completed"),
+      v.literal("failed"),
+      v.literal("cancelled")
+    ),
+    workerId: v.optional(v.string()),
+    attemptCount: v.number(),
+    error: v.optional(v.string()),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    lastHeartbeatAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_sessionId_and_createdAt", ["sessionId", "createdAt"])
+    .index("by_status_and_createdAt", ["status", "createdAt"]),
 });

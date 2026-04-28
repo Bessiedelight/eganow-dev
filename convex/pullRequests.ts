@@ -25,13 +25,27 @@ function humanizePullRequestValue(value: string | null | undefined) {
 export const listByOrg = query({
   args: { orgId: v.id("organizations") },
   handler: async (ctx, args) => {
-    const prs = await ctx.db
+    const userId = await getAuthUserId(ctx);
+    const currentMember = userId
+      ? await ctx.db
+          .query("members")
+          .withIndex("by_org_and_user", (q) =>
+            q.eq("organizationId", args.orgId).eq("userId", userId)
+          )
+          .first()
+      : null;
+
+    let prs = await ctx.db
       .query("pullRequests")
       .withIndex("by_organizationId", (q) =>
         q.eq("organizationId", args.orgId)
       )
       .order("desc")
       .collect();
+
+    if (currentMember) {
+      prs = prs.filter((pr) => pr.createdAt >= currentMember.joinedAt);
+    }
 
     const enriched = await Promise.all(
       prs.map(async (pr) => {
@@ -190,6 +204,8 @@ export const syncFromGitHub = mutation({
     additions: v.optional(v.number()),
     deletions: v.optional(v.number()),
     changedFiles: v.optional(v.number()),
+    mergeable: v.optional(v.boolean()),
+    mergeableState: v.optional(v.string()),
     mergedBy: v.optional(v.string()),
     mergedAt: v.optional(v.number()),
     reviewers: v.optional(
@@ -276,6 +292,8 @@ export const syncFromGitHub = mutation({
       if (args.additions !== undefined) patch.additions = args.additions;
       if (args.deletions !== undefined) patch.deletions = args.deletions;
       if (args.changedFiles !== undefined) patch.changedFiles = args.changedFiles;
+      if (args.mergeable !== undefined) patch.mergeable = args.mergeable;
+      if (args.mergeableState !== undefined) patch.mergeableState = args.mergeableState;
       if (args.mergedBy !== undefined) patch.mergedBy = args.mergedBy;
       if (args.mergedAt !== undefined) patch.mergedAt = args.mergedAt;
       if (args.reviewers !== undefined) patch.reviewers = args.reviewers;
@@ -458,6 +476,8 @@ export const syncFromGitHub = mutation({
       additions: args.additions,
       deletions: args.deletions,
       changedFiles: args.changedFiles,
+      mergeable: args.mergeable,
+      mergeableState: args.mergeableState,
       mergedBy: args.mergedBy,
       mergedAt: args.mergedAt,
       reviewers: args.reviewers,

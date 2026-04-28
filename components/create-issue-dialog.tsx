@@ -24,7 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import {
   Maximize2, X, Zap, CircleDashed, User, Tag, MoreHorizontal, Paperclip, Check, Circle, CheckCircle2, XCircle, LayoutGrid, ChevronRight, SignalMedium, SignalHigh, SignalLow, CircleDot, Milestone, AlertCircle, GitBranch, Users,
-  Code2, Layers, Headset, HardDrive, Palette, Car, Globe, Shield, Bug, Rocket, Database, Cpu, Wifi, Smartphone, Monitor, Lock, Settings, Star, Heart, KanbanSquare, Mic, RefreshCw
+  Code2, Layers, Headset, HardDrive, Palette, Car, Globe, Shield, Bug, Rocket, Database, Cpu, Wifi, Smartphone, Monitor, Lock, Settings, Star, Heart, KanbanSquare, Mic, RefreshCw, Link2
 } from "lucide-react"
 
 // Team icon registry — must match the icons in teams/page.tsx
@@ -56,6 +56,20 @@ function getTeamIcon(name?: string) {
 
 type IssueStatus = "backlog" | "todo" | "in_progress" | "in_review" | "done" | "cancelled"
 type IssuePriority = "urgent" | "high" | "medium" | "low" | "none"
+
+type PendingAttachment = {
+  storageId: string
+  fileName: string
+  contentType?: string
+  size?: number
+  previewUrl?: string
+}
+
+type PendingIssueLink = {
+  id: string
+  label?: string
+  url: string
+}
 
 const statusOptions: { value: IssueStatus; label: string; icon: any; color: string }[] = [
   { value: "todo", label: "Open issue", icon: CircleDot, color: "text-green-500" },
@@ -98,6 +112,13 @@ export function CreateIssueDialog({
   const [selectedProjectId, setSelectedProjectId] = React.useState<string | undefined>(defaultProjectId)
   const [createMore, setCreateMore] = React.useState(false)
   const [isSubmitting, setIsSubmitting] = React.useState(false)
+  const [pendingAttachments, setPendingAttachments] = React.useState<PendingAttachment[]>([])
+  const [pendingLinks, setPendingLinks] = React.useState<PendingIssueLink[]>([])
+  const [linkLabel, setLinkLabel] = React.useState("")
+  const [linkUrl, setLinkUrl] = React.useState("")
+  const [isUploadingAttachment, setIsUploadingAttachment] = React.useState(false)
+  const attachmentInputRef = React.useRef<HTMLInputElement | null>(null)
+  const pendingAttachmentsRef = React.useRef<PendingAttachment[]>([])
 
   // Voice Recording state
   const [isRecording, setIsRecording] = React.useState(false)
@@ -144,8 +165,18 @@ export function CreateIssueDialog({
 
   const createIssue = useMutation(api.issues.create)
   const linkToGitHub = useMutation(api.issues.linkToGitHub)
+  const generateFileUploadUrl = useMutation(api.issues.generateFileUploadUrl)
+
+  const revokeAttachmentPreviews = React.useCallback((attachments: PendingAttachment[]) => {
+    attachments.forEach((attachment) => {
+      if (attachment.previewUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(attachment.previewUrl)
+      }
+    })
+  }, [])
 
   const resetForm = () => {
+    revokeAttachmentPreviews(pendingAttachments)
     setTitle("")
     setBody("")
     setStatus("todo")
@@ -155,12 +186,26 @@ export function CreateIssueDialog({
     setSelectedRepoFullName(undefined)
     setSelectedTeamId(undefined)
     setSelectedProjectId(defaultProjectId)
+    setPendingAttachments([])
+    setPendingLinks([])
+    setLinkLabel("")
+    setLinkUrl("")
   }
 
   React.useEffect(() => {
     if (!open) return
     setSelectedProjectId((current) => current ?? defaultProjectId)
   }, [open, defaultProjectId])
+
+  React.useEffect(() => {
+    pendingAttachmentsRef.current = pendingAttachments
+  }, [pendingAttachments])
+
+  React.useEffect(() => {
+    return () => {
+      revokeAttachmentPreviews(pendingAttachmentsRef.current)
+    }
+  }, [revokeAttachmentPreviews])
 
   const toggleAssignee = React.useCallback((memberId: string) => {
     setSelectedAssigneeIds((current) =>
@@ -169,6 +214,85 @@ export function CreateIssueDialog({
         : [...current, memberId]
     )
   }, [])
+
+  const handleAttachmentUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || [])
+    if (!files.length) return
+
+    setIsUploadingAttachment(true)
+    try {
+      const uploaded: PendingAttachment[] = []
+      for (const file of files) {
+        const uploadUrl = await generateFileUploadUrl({})
+        const response = await fetch(uploadUrl, {
+          method: "POST",
+          headers: { "Content-Type": file.type || "application/octet-stream" },
+          body: file,
+        })
+
+        if (!response.ok) throw new Error("Upload failed")
+        const { storageId } = await response.json()
+
+        uploaded.push({
+          storageId,
+          fileName: file.name,
+          contentType: file.type || undefined,
+          size: file.size,
+          previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+        })
+      }
+
+      setPendingAttachments((current) => [...current, ...uploaded])
+    } catch {
+      toast.error("Failed to upload file")
+    } finally {
+      setIsUploadingAttachment(false)
+      if (event.target) event.target.value = ""
+    }
+  }
+
+  const removePendingAttachment = (storageId: string) => {
+    setPendingAttachments((current) =>
+      current.filter((attachment) => {
+        if (attachment.storageId === storageId && attachment.previewUrl?.startsWith("blob:")) {
+          URL.revokeObjectURL(attachment.previewUrl)
+        }
+        return attachment.storageId !== storageId
+      })
+    )
+  }
+
+  const handleAddLink = () => {
+    const rawUrl = linkUrl.trim()
+    if (!rawUrl) return
+
+    let normalizedUrl = rawUrl
+    try {
+      normalizedUrl = new URL(rawUrl).toString()
+    } catch {
+      try {
+        normalizedUrl = new URL(`https://${rawUrl}`).toString()
+      } catch {
+        toast.error("Enter a valid URL")
+        return
+      }
+    }
+
+    setPendingLinks((current) => [
+      ...current,
+      {
+        id: `${Date.now()}-${current.length}`,
+        label: linkLabel.trim() || undefined,
+        url: normalizedUrl,
+      },
+    ])
+    setLinkLabel("")
+    setLinkUrl("")
+  }
+
+  const removePendingLink = (linkId: string) => {
+    setPendingLinks((current) => current.filter((link) => link.id !== linkId))
+  }
 
   const toggleRecording = async () => {
     if (isRecording) {
@@ -284,6 +408,16 @@ export function CreateIssueDialog({
         teamId: selectedTeamId as any,
         projectId: selectedProjectId as any,
         githubRepoFullName: selectedRepoFullName,
+        links: pendingLinks.map((link) => ({
+          label: link.label,
+          url: link.url,
+        })),
+        files: pendingAttachments.map((attachment) => ({
+          storageId: attachment.storageId as any,
+          fileName: attachment.fileName,
+          contentType: attachment.contentType,
+          size: attachment.size,
+        })),
       })
 
       // If repo selected, also create on GitHub
@@ -678,10 +812,114 @@ export function CreateIssueDialog({
 
         </div>
 
+        <div className="px-6 pb-5">
+          <div className="rounded-xl border border-border/50 bg-muted/10 p-3.5">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-[12px] font-semibold text-foreground">Attachments & links</div>
+                <div className="text-[11px] text-muted-foreground mt-0.5">
+                  Add reference URLs and files before creating the issue.
+                </div>
+              </div>
+              <input
+                ref={attachmentInputRef}
+                type="file"
+                multiple
+                className="hidden"
+                onChange={handleAttachmentUpload}
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => attachmentInputRef.current?.click()}
+                disabled={isUploadingAttachment}
+                className="h-8 gap-1.5 text-[12px] font-medium shadow-none"
+              >
+                {isUploadingAttachment ? <RefreshCw className="size-3.5 animate-spin" /> : <Paperclip className="size-3.5" />}
+                {isUploadingAttachment ? "Uploading..." : "Add files"}
+              </Button>
+            </div>
+
+            <div className="mt-3 flex flex-col gap-2 md:grid md:grid-cols-[minmax(0,180px)_minmax(0,1fr)_auto]">
+              <input
+                value={linkLabel}
+                onChange={(e) => setLinkLabel(e.target.value)}
+                placeholder="Link label (optional)"
+                className="h-9 rounded-lg border border-border/60 bg-background px-3 text-[12px] text-foreground outline-none placeholder:text-muted-foreground/60"
+              />
+              <input
+                value={linkUrl}
+                onChange={(e) => setLinkUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault()
+                    handleAddLink()
+                  }
+                }}
+                placeholder="https://example.com"
+                className="h-9 rounded-lg border border-border/60 bg-background px-3 text-[12px] text-foreground outline-none placeholder:text-muted-foreground/60"
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleAddLink}
+                disabled={!linkUrl.trim()}
+                className="h-9 gap-1.5 text-[12px] font-medium shadow-none"
+              >
+                <Link2 className="size-3.5" /> Add link
+              </Button>
+            </div>
+
+            {(pendingLinks.length > 0 || pendingAttachments.length > 0) && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {pendingLinks.map((link) => (
+                  <div
+                    key={link.id}
+                    className="flex max-w-full items-center gap-2 rounded-full border border-border/50 bg-background px-3 py-1.5 text-[11px] text-foreground"
+                  >
+                    <Link2 className="size-3 text-blue-500 shrink-0" />
+                    <span className="truncate max-w-[220px]">
+                      {link.label ? `${link.label} - ${link.url}` : link.url}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removePendingLink(link.id)}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+
+                {pendingAttachments.map((attachment) => (
+                  <div
+                    key={attachment.storageId}
+                    className="flex max-w-full items-center gap-2 rounded-full border border-border/50 bg-background px-3 py-1.5 text-[11px] text-foreground"
+                  >
+                    <Paperclip className="size-3 text-muted-foreground shrink-0" />
+                    <span className="truncate max-w-[220px]">{attachment.fileName}</span>
+                    <button
+                      type="button"
+                      onClick={() => removePendingAttachment(attachment.storageId)}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
         {/* Footer Area */}
         <div className="flex items-center justify-between px-6 py-3 border-t border-border/10 bg-muted/10">
-          <div className="flex items-center justify-center size-[30px] rounded-full border border-border/60 text-muted-foreground cursor-pointer hover:bg-muted/50 transition-colors bg-background">
-            <Paperclip className="size-3.5" />
+          <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span>{pendingLinks.length} link{pendingLinks.length !== 1 ? "s" : ""}</span>
+            <span>•</span>
+            <span>{pendingAttachments.length} file{pendingAttachments.length !== 1 ? "s" : ""}</span>
           </div>
 
           <div className="flex items-center gap-4">

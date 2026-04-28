@@ -112,6 +112,8 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
     organization ? { orgId: organization._id, identifier: resolvedParams.issueId } : "skip"
   )
   const issueThread = useQuery(api.activityEvents.getIssueThread, issue ? { issueId: issue._id } : "skip")
+  const issueLinks = useQuery(api.issues.listLinks, issue ? { issueId: issue._id } : "skip")
+  const issueFiles = useQuery(api.issues.listFiles, issue ? { issueId: issue._id } : "skip")
   const members = useQuery(api.members.listByOrg, organization ? { orgId: organization._id } : "skip")
   const teams = useQuery(api.teams.listByOrg, organization ? { orgId: organization._id } : "skip")
   const projects = useQuery(api.projects.listByOrg, organization ? { orgId: organization._id } : "skip")
@@ -299,6 +301,7 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
             <div className="flex-1 min-h-0 flex flex-col bg-background">
               {activeView === "ai-chat" ? (
                 <IssueAiChatTab
+                  issueId={issue._id}
                   issueTitle={issue.title}
                   issueIdentifier={displayId}
                   issueBody={issue.body}
@@ -811,6 +814,66 @@ export default function IssueDetailPage({ params }: { params: Promise<{ issueId:
                         </div>
                       )
                     })}
+                  </div>
+                </>
+              )}
+
+              {issueLinks && issueLinks.length > 0 && (
+                <>
+                  <Separator className="bg-border/60" />
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider px-1">Links</span>
+                    {issueLinks.map((link: any) => (
+                      <a
+                        key={link._id}
+                        href={link.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/40 hover:bg-muted/20 hover:border-border/60 transition-all group"
+                      >
+                        <Link2 className="size-4 shrink-0 text-blue-500" />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[12px] font-medium text-foreground truncate">
+                            {link.label || link.url}
+                          </div>
+                          {link.label && (
+                            <div className="text-[11px] text-muted-foreground truncate mt-1">
+                              {link.url}
+                            </div>
+                          )}
+                        </div>
+                        <ChevronRight className="size-3.5 text-muted-foreground/30 group-hover:text-muted-foreground transition-colors" />
+                      </a>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              {issueFiles && issueFiles.length > 0 && (
+                <>
+                  <Separator className="bg-border/60" />
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[12px] font-semibold text-muted-foreground uppercase tracking-wider px-1">Files</span>
+                    {issueFiles.map((file: any) => (
+                      <a
+                        key={file._id}
+                        href={file.url || "#"}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-3 px-4 py-3 rounded-xl border border-border/40 hover:bg-muted/20 hover:border-border/60 transition-all group"
+                      >
+                        <Paperclip className="size-4 shrink-0 text-muted-foreground" />
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[12px] font-medium text-foreground truncate">
+                            {file.fileName}
+                          </div>
+                          <div className="text-[11px] text-muted-foreground truncate mt-1">
+                            {file.contentType || "File"}{file.size ? ` • ${(file.size / 1024).toFixed(file.size >= 1024 * 1024 ? 0 : 1)} KB` : ""}
+                          </div>
+                        </div>
+                        <ChevronRight className="size-3.5 text-muted-foreground/30 group-hover:text-muted-foreground transition-colors" />
+                      </a>
+                    ))}
                   </div>
                 </>
               )}

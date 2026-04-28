@@ -96,13 +96,17 @@ export const listByOrg = query({
           .first()
       : null;
 
-    const issues = await ctx.db
+    let issues = await ctx.db
       .query("issues")
       .withIndex("by_organizationId", (q) =>
         q.eq("organizationId", args.orgId)
       )
       .order("desc")
       .collect();
+
+    if (currentMember) {
+      issues = issues.filter((issue) => issue.createdAt >= currentMember.joinedAt);
+    }
 
     // Enrich each issue with resolved relations
     const enriched = await Promise.all(
@@ -324,6 +328,36 @@ export const getById = query({
   },
 });
 
+export const listLinks = query({
+  args: { issueId: v.id("issues") },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("issueLinks")
+      .withIndex("by_issueId", (q) => q.eq("issueId", args.issueId))
+      .order("desc")
+      .take(50);
+  },
+});
+
+export const listFiles = query({
+  args: { issueId: v.id("issues") },
+  handler: async (ctx, args) => {
+    const files = await ctx.db
+      .query("issueFiles")
+      .withIndex("by_issueId", (q) => q.eq("issueId", args.issueId))
+      .order("desc")
+      .take(50);
+
+    return await Promise.all(
+      files.map(async (file) => ({
+        ...file,
+        url: await ctx.storage.getUrl(file.storageId),
+        isImage: !!file.contentType?.startsWith("image/"),
+      }))
+    );
+  },
+});
+
 // ─── Mutations ────────────────────────────────────────────────
 
 /**
@@ -356,6 +390,24 @@ export const create = mutation({
     labelIds: v.optional(v.array(v.id("labels"))),
     // GitHub sync fields (set after creating on GitHub)
     githubRepoFullName: v.optional(v.string()),
+    links: v.optional(
+      v.array(
+        v.object({
+          label: v.optional(v.string()),
+          url: v.string(),
+        })
+      )
+    ),
+    files: v.optional(
+      v.array(
+        v.object({
+          storageId: v.id("_storage"),
+          fileName: v.string(),
+          contentType: v.optional(v.string()),
+          size: v.optional(v.number()),
+        })
+      )
+    ),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -416,6 +468,26 @@ export const create = mutation({
       updatedAt: now,
     });
 
+    for (const link of args.links || []) {
+      await ctx.db.insert("issueLinks", {
+        issueId,
+        label: link.label,
+        url: link.url,
+        createdAt: now,
+      });
+    }
+
+    for (const file of args.files || []) {
+      await ctx.db.insert("issueFiles", {
+        issueId,
+        storageId: file.storageId,
+        fileName: file.fileName,
+        contentType: file.contentType,
+        size: file.size,
+        createdAt: now,
+      });
+    }
+
     // Record activity event
     await ctx.db.insert("activityEvents", {
       organizationId: args.orgId,
@@ -447,6 +519,13 @@ export const create = mutation({
     }
 
     return { issueId, identifier, sequenceNumber: newSeqNumber };
+  },
+});
+
+export const generateFileUploadUrl = mutation({
+  args: {},
+  handler: async (ctx) => {
+    return await ctx.storage.generateUploadUrl();
   },
 });
 

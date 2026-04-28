@@ -137,7 +137,8 @@ export default function Page() {
     api.notifications.listForCurrentUser,
     organization ? { orgId: organization._id, filter: "all", retainedIds: retainedIds as any[] } : "skip"
   )
-  const selectedNotification = rawNotifications?.find((n) => n._id === selectedId) ?? null
+  const selectedNotification =
+    rawNotifications?.find((n) => n?._id === selectedId) ?? null
   const threadIssueId = selectedNotification?.issueId ?? null
   const threadPullRequestId =
     selectedNotification && !selectedNotification.issueId
@@ -214,13 +215,6 @@ export default function Page() {
 
   // ─── Selected notification ────────────────────────────
   const selected = notifications?.find((n) => n._id === selectedId) ?? null
-
-  // Auto-select first item if nothing is selected
-  React.useEffect(() => {
-    if (notifications && notifications.length > 0 && !selectedId) {
-      setSelectedId(notifications[0]._id)
-    }
-  }, [notifications, selectedId])
 
   React.useEffect(() => {
     setDiscussionBody("")

@@ -4,14 +4,19 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
+    "dev": "node scripts/run-app-with-worker.mjs dev",
+    "dev:app": "next dev --turbopack",
+    "issue-agent:worker": "node --experimental-strip-types --experimental-specifier-resolution=node issue-agent-worker.ts",
+    "issue-agent:worker:once": "node --experimental-strip-types --experimental-specifier-resolution=node issue-agent-worker.ts --once",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/run-app-with-worker.mjs start",
+    "start:app": "next start",
     "lint": "eslint",
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.117",
     "@auth/core": "0.37.0",
     "@convex-dev/auth": "^0.0.91",
     "@gsap/react": "^2.1.2",

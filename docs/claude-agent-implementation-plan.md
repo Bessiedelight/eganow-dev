@@ -1,911 +1,920 @@
-# Claude Agent Integration Implementation Plan
+# Claude Agent SDK Integration Plan
 
-## Status
+Prepared on April 22, 2026.
 
-Prepared on April 21, 2026 after:
+## Objective
 
-- reviewing the current codebase, especially GitHub installation/bootstrap, issue-to-repo linkage, pull request sync, and the existing Codex handoff UI
-- verifying Anthropic's official Claude Agent SDK documentation and deployment guidance
+Integrate the Claude Agent SDK into the existing issue workflow so a user can open an issue, use the existing chatbot section in `/dashboard/issues/[issueId]`, have Claude work against the GitHub repository already connected through the app's GitHub App installation, and publish a pull request after making code changes.
 
-## Goal
+This plan is intentionally aligned to your current product constraints:
 
-Replace the current ChatGPT/Codex handoff flow with a first-class in-app `Claude Agent` experience:
+- keep the current UI structure and entry points
+- reuse the existing GitHub App integration
+- reuse the existing encrypted Anthropic key flow in Settings
+- avoid replacing the current GitHub webhook and PR sync architecture
 
-- users connect Claude in Settings by providing an Anthropic API key
-- an issue gets a `Claude Agent` tab with a chatbot-style interface
-- the agent works against the GitHub repository linked to that issue
-- the agent can read code, edit files, create new files, run repo-local commands, and create pull requests
-- the app continues to use the existing GitHub App integration as the system of record for repository access and PR synchronization
+## Executive Summary
 
-## Official Anthropic Documentation
+The app already has most of the platform pieces required for this feature:
 
-These are the primary official sources that should drive the implementation:
+- a GitHub App integration with installation-scoped Octokit clients
+- issue, project, PR, branch, and webhook sync data in Convex
+- a settings flow that already stores a user-scoped Anthropic API key encrypted at rest
+- an existing issue detail toggle and `IssueAiChatTab` placeholder
 
-- [Agent SDK overview](https://platform.claude.com/docs/en/agent-sdk/overview)
-- [Agent SDK quickstart](https://platform.claude.com/docs/en/agent-sdk/quickstart)
-- [Configure permissions](https://platform.claude.com/docs/en/agent-sdk/permissions)
-- [Handle approvals and user input](https://platform.claude.com/docs/en/agent-sdk/user-input)
-- [Work with sessions](https://platform.claude.com/docs/en/agent-sdk/sessions)
-- [Get structured output from agents](https://platform.claude.com/docs/en/agent-sdk/structured-outputs)
-- [Give Claude custom tools](https://platform.claude.com/docs/en/agent-sdk/custom-tools)
-- [Connect to external tools with MCP](https://platform.claude.com/docs/en/agent-sdk/mcp)
-- [Intercept and control agent behavior with hooks](https://platform.claude.com/docs/en/agent-sdk/hooks)
-- [Hosting the Agent SDK](https://platform.claude.com/docs/en/agent-sdk/hosting)
-- [Securely deploying AI agents](https://platform.claude.com/docs/en/agent-sdk/secure-deployment)
-- [TypeScript Agent SDK reference](https://platform.claude.com/docs/en/agent-sdk/typescript)
-- [TypeScript SDK V2 interface preview](https://platform.claude.com/docs/en/agent-sdk/typescript-v2-preview)
-- [Track cost and usage](https://platform.claude.com/docs/en/agent-sdk/cost-tracking)
+The missing pieces are not UI chrome. The missing pieces are:
 
-Important takeaways from those docs:
+- persistent issue-agent sessions
+- git worktree-based repo workspaces
+- a long-running Claude Agent SDK execution service
+- approval handling
+- a controlled publish path from workspace to GitHub branch and PR
 
-- Anthropic has renamed the old Claude Code SDK to the `Claude Agent SDK`.
-- The correct TypeScript package is `@anthropic-ai/claude-agent-sdk`.
-- Anthropic explicitly says third-party apps should use API-key authentication here, not `claude.ai` login.
-- The SDK already includes the built-in tools we need for coding work: read, write, edit, glob, grep, bash, sessions, hooks, approvals, and custom tools.
-- Anthropic recommends running the SDK in a sandboxed container environment for production.
-- Anthropic's session docs are explicit that sessions persist conversation history, not filesystem state.
-- Anthropic's TypeScript docs currently document both:
-  - V1 `query()` plus `continue` / `resume`
-  - V2 preview `unstable_v2_createSession()` / `unstable_v2_resumeSession()`
-- Anthropic's cost-tracking docs expose per-call totals and per-model usage, which should be wired into the app because each user funds runs with their own API key.
+The cleanest implementation is:
 
-## What The Current Codebase Already Does Well
+1. Keep Convex as the control plane.
+2. Add a dedicated worker/runtime that runs `@anthropic-ai/claude-agent-sdk`.
+3. Provision one top-level git worktree per active issue session.
+4. Let Claude edit code inside that workspace.
+5. Keep GitHub credentials and PR publication under app control via custom tools.
+6. Let existing GitHub webhooks continue to synchronize PR state back into Convex.
 
-### GitHub app and organization bootstrap
+## What Was Verified
 
-Existing paths:
+### Official Anthropic SDK facts
+
+From Anthropic's current official docs:
+
+- the old Claude Code SDK name has been renamed to the Claude Agent SDK
+- the current TypeScript package is `@anthropic-ai/claude-agent-sdk`
+- the SDK includes built-in tools such as `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebSearch`, and `WebFetch`
+- the SDK supports sessions, custom tools, MCP, permissions, hooks, and subagents
+- Anthropic explicitly says third-party products should use API-key authentication for this SDK flow
+- Anthropic documents Claude Code as running locally for local usage, not requiring a container runtime by default
+- Anthropic documents git worktrees as the recommended way to run parallel Claude coding sessions against the same repo
+- Anthropic states that session resume preserves conversation context, not filesystem state
+- Anthropic documents that resumed sessions depend on the same `cwd`, and stores session transcripts under `~/.claude/projects/<encoded-cwd>/`
+- Anthropic documents SDK-side approvals, hooks, and custom tools as the correct extension points
+
+### Official GitHub integration facts
+
+From GitHub's current official docs:
+
+- GitHub App installation tokens are short-lived and expire after 1 hour
+- GitHub recommends using Octokit app/installation auth so token generation and refresh are handled for you
+- a pull request is created from a head branch into a base branch
+
+## Current Codebase Findings
+
+### Existing frontend entry points
+
+Relevant files:
+
+- `app/dashboard/issues/[issueId]/page.tsx`
+- `components/issue-ai-chat-tab.tsx`
+- `app/dashboard/settings/page.tsx`
+
+What exists now:
+
+- the issue detail page already has an `ai-chat` view and a `Claude Code Agent` toggle
+- the settings page already has a Claude/Anthropic connection card
+- `IssueAiChatTab` is currently a static shell, not a working chat system
+
+Implication:
+
+- this project does not need a UI redesign
+- it needs backend session wiring, state, streaming, approvals, and publish behavior behind the existing UI surface
+
+### Existing GitHub platform layer
+
+Relevant files:
 
 - `lib/github/app.ts`
 - `lib/github/client.ts`
-- `app/api/github/callback/route.ts`
-- `app/api/github/installation/[id]/route.ts`
+- `lib/github/actions.ts`
 - `app/api/github/webhooks/route.ts`
 - `convex/github.ts`
-- `convex/organizations.ts`
-- `hooks/use-organization.ts`
 
-Current behavior:
+What exists now:
 
-- the app already authenticates to GitHub as a GitHub App
-- GitHub installations are stored in Convex
-- installations bootstrap organizations and memberships
-- the current organization is resolved from the authenticated user
+- the app already authenticates as a GitHub App
+- installation-scoped Octokit clients already exist through `getInstallationClient`
+- the app already creates issues, comments, and pull requests via GitHub App auth
+- webhook routes already sync GitHub events back into Convex
 
-Why this matters:
+Implication:
 
-- we do not need Claude to manage repo auth itself
-- the agent runtime should consume the existing installation context, not invent a second GitHub auth model
+- the Claude runtime should not own GitHub auth
+- the existing GitHub App integration should remain the only source of truth for repo access and PR publication
 
-### Repo ownership and issue-to-repo linkage
+### Existing repo and issue linkage
 
-Existing paths:
+Relevant files:
 
 - `convex/schema.ts`
 - `convex/issues.ts`
-- `convex/projects.ts`
-- `app/dashboard/issues/[issueId]/page.tsx`
-- `components/issue-ai-chat-tab.tsx`
-- `lib/codex/handoff.ts`
-
-Current behavior:
-
-- an issue may already have `issue.githubRepoFullName`
-- a project may define `project.githubRepoFullNames`
-- the current Codex handoff logic already resolves repo choice using:
-  - issue repo first
-  - single project repo second
-  - manual repo selection if the project spans multiple repos
-
-Why this matters:
-
-- this repo resolution logic is already correct in spirit and should be reused for Claude
-- the app already knows when repo linkage is ambiguous and when it is missing
-
-### Pull request lifecycle and issue linkage
-
-Existing paths:
-
-- `lib/github/actions.ts`
-- `lib/github/handlers/pull-request.ts`
-- `lib/github/handlers/issues.ts`
 - `convex/pullRequests.ts`
-- `convex/comments.ts`
 
-Current behavior:
+What exists now:
 
-- the app can already create GitHub issues, comments, and pull requests via the GitHub App installation
-- pull request webhooks already sync PR state back into Convex
-- PR bodies are already parsed for issue links
-- the app already auto-links PRs to issues using either:
-  - GitHub issue numbers in the same repo, such as `Closes #123`
-  - app-native identifiers, such as `Closes BAC-102`
+- issues can already store `githubRepoFullName`, `githubIssueNumber`, and `githubUrl`
+- projects can already store `githubRepoFullNames`
+- pull requests already sync and auto-link back to issues through body parsing and junction tables
 
-Why this matters:
+Implication:
 
-- Claude does not need to implement PR syncing logic itself
-- the agent only needs to create a valid branch/commit/PR and let the existing webhook machinery do the rest
-- the PR body should intentionally include issue linkage text so existing sync logic keeps working
+- repo resolution should reuse existing issue and project linkage
+- PR bodies created by the agent should include issue-link text that your current parser already understands
 
-### Existing AI settings and encryption
+### Existing AI key and review infrastructure
 
-Existing paths:
+Relevant files:
 
 - `convex/aiReviews.ts`
 - `convex/aiReviewActions.ts`
+- `convex/reviewOrchestration.ts`
+- `convex/reviewOrchestrationActions.ts`
 - `lib/ai/crypto.ts`
-- `app/dashboard/settings/page.tsx`
 
-Current behavior:
+What exists now:
 
-- Anthropic API keys are already encrypted before storage using AES-256-GCM
-- the settings page already has an Anthropic connection card
+- Anthropic API keys are already encrypted with AES-256-GCM before storage
+- PR review orchestration already uses Convex as a background job and message/status control plane
 
-Why this matters:
+Implication:
 
-- we can reuse the existing encryption/storage path instead of creating a second key vault flow
-- the settings UI should be repurposed from "optional review provider" to "Connect to Claude"
+- reuse the encrypted key flow
+- use the review orchestration architecture as a reference pattern
+- do not overload the PR review tables for issue coding sessions because the lifecycle is different
 
-## What Should Be Removed Or Replaced
+## Scope
 
-Remove or replace the current Codex handoff flow:
+### In scope
 
-- remove `lib/codex/handoff.ts`
-- replace the current Codex-oriented `IssueAiChatTab` implementation
-- replace the `CodexSettingsCard` UI in `app/dashboard/settings/page.tsx`
-- replace the issue-detail header button label from `Codex Agent` to `Claude Agent`
+- connect the current issue chatbot tab to a real Claude Agent SDK session
+- use each user's own Anthropic API key from Settings
+- use the already connected GitHub App installation for repository bootstrap and PR creation
+- let Claude read, edit, search, and run repo-local commands inside a dedicated git worktree
+- let Claude publish a pull request through an app-controlled tool
+- store transcripts, approvals, status, and session metadata in Convex
 
-Do not remove the existing GitHub App integration.
+### Out of scope for v1
 
-Do not replace the existing PR webhook sync pipeline.
+- redesigning the issue page layout
+- replacing the existing GitHub webhook sync pipeline
+- browser-side Claude execution
+- using a user's GitHub PAT instead of the app installation
+- open internet access from the agent by default
+- replacing the PR review orchestration system
 
-Do not make Claude responsible for storing canonical GitHub state in Convex.
+## Key Product And Compliance Notes
+
+### UI constraint
+
+You asked to keep the UI unchanged. This plan assumes:
+
+- we keep the current issue detail toggle and chatbot placement
+- we keep the current settings page location for Claude key entry
+- we only wire up behavior and status inside the existing layout
+
+### Anthropic naming risk
+
+Anthropic's current Agent SDK docs include branding guidance that says third-party products should not present themselves as "Claude Code" or "Claude Code Agent."
+
+That creates a launch-risk tradeoff:
+
+- internal/dev usage can keep the current label temporarily
+- public/customer-facing release should likely switch to something like `Claude Agent` or `Powered by Claude`
+
+This is not a blocker for engineering, but it should be surfaced before release.
 
 ## Recommended Architecture
 
-## Core principle
+## 1. Control plane: Convex
 
-Keep one source of truth per concern:
+Convex should remain the source of truth for:
 
-- GitHub App remains the source of truth for repository access and PR creation
-- Convex remains the source of truth for app state, issue linkage, sessions, chat history, approvals, and UI reactivity
-- a dedicated Claude Agent runtime service becomes the execution layer for coding tasks
+- issue-agent session metadata
+- transcript messages
+- pending approvals
+- workspace state
+- publish state
+- final artifacts such as branch and PR metadata
 
-This is the smallest architecture that is still reliable end-to-end.
+Why:
 
-## Recommended runtime model
+- you already use Convex successfully for app state and background orchestration
+- the UI is already reactive through Convex queries
+- this keeps the Next.js app thin and lets the worker remain stateless apart from session/workspace persistence
 
-Use the TypeScript Claude Agent SDK in a dedicated Node worker service, not inside the browser and not inside the current Codex handoff.
+## 2. Execution plane: dedicated Claude worker
 
-Reasoning:
+Run the Claude Agent SDK in a dedicated Node worker service, not in the browser and not directly inside short-lived request handlers.
 
-- the app is already TypeScript/Next.js-based
-- Anthropic's SDK is a long-running process with persistent working-directory context and session state
-- Anthropic's hosting guidance explicitly recommends a sandboxed container environment for production
-- this does not fit well as a thin client-side feature or as a one-shot prompt relay
+Why:
 
-## Session API choice
+- the SDK is long-running and stateful
+- issue chat needs resumable multi-turn sessions
+- the worker must manage filesystem state, approvals, and streaming tool events
 
-The first draft of this plan leaned too hard toward "stable `query()` and not V2." That was too absolute.
+Recommended runtime:
 
-What the Anthropic docs support today:
+- TypeScript worker using `@anthropic-ai/claude-agent-sdk`
+- dedicated Node worker process on the server
+- one manually managed top-level git worktree per active session
+- no container, VM, or orchestration layer in v1
 
-- for one-shot tasks, a single `query()` call is enough
-- for multi-turn TypeScript chat, the docs support:
-  - V1 `query()` plus `resume` or `continue: true`
-  - V2 preview session APIs with `unstable_v2_createSession()` and `unstable_v2_resumeSession()`
+## 3. Workspace manager
 
-Recommended decision:
+Each active issue session needs one git worktree on the server filesystem.
 
-- for v1 production, design the persistence model around explicit session IDs, not around one-shot calls
-- the worker may implement that with either:
-  - V1 `query()` plus captured `session_id` and later `resume`
-  - V2 preview sessions if the team prefers the `send()` / `stream()` ergonomics after a short spike
+Responsibilities:
 
-The key requirement is not "V1 vs V2." The key requirement is that the implementation must support explicit session resume for a chat-style issue tab.
+- resolve the target repository
+- clone the repo once per organization or repo into a base clone location
+- add a worktree from that base clone for the issue session
+- create or reuse a branch for the issue session inside that worktree
+- ensure the Claude SDK always resumes with the same effective working directory
+- persist both the worktree path and the Claude session transcript path
 
-## Session lifecycle vs workspace lifecycle
+Recommended v1 model:
 
-These must be treated as separate resources:
+- base clone per repo or organization-managed repo pool
+- deterministic session worktree path, for example `/workspaces/{sessionId}`
+- create the worktree with Git directly, for example `git worktree add /workspaces/{sessionId} -b {branchName}`
+- point the Claude worker `cwd` at `/workspaces/{sessionId}`
+- resume the same Claude session only from the same worktree path
 
-- Claude session lifecycle:
-  - conversation transcript
-  - tool history
-  - model context
-  - Anthropic session ID
-- workspace lifecycle:
-  - cloned repository
-  - checked out branch
-  - edited files
-  - local git state
-  - sandbox/container
+Suggested directory layout:
 
-Important consequence:
+```text
+/repos/
+  {repoKey}/               base clone used to create worktrees
 
-- resuming a Claude session does not restore the filesystem
-- restoring a workspace does not restore the Claude transcript unless the session files are also present
+/workspaces/
+  {sessionId}/             git worktree and Claude working directory
+```
 
-The implementation must persist and recover both independently.
+Important implementation note:
 
-## High-level component layout
+- Anthropic's current session docs do not place session transcripts inside the repository `.claude/` directory by default
+- session transcripts are stored under `~/.claude/projects/<encoded-cwd>/`
+- because of that, `claudeSessionPath` should be stored as the resolved transcript directory derived from the worktree path, not as `worktree/.claude/`
 
-### 1. Settings and connection layer
+Important rule:
 
-Responsibility:
+- Claude session state and filesystem state must be treated as separate persisted assets
+- always use a top-level manually managed worktree for the issue session
+- do not use subagent `isolation: worktree` or transient subagent worktrees for the main issue session, because those are not the right persistence model for resumable user-owned sessions
 
-- store the user's Anthropic API key securely
-- validate that the key works
-- expose connection status in Settings
+## 4. Publish boundary
 
-Implementation note:
+Do not let Claude directly push to GitHub using raw credentials as the primary path.
 
-- reuse the existing encrypted Anthropic key path
-- simplify the UI and semantics so this becomes a `Connect to Claude` feature, not just a review-provider toggle
+Instead:
 
-### 2. Repo resolution layer
+- Claude edits locally
+- Claude asks to publish
+- the app exposes a controlled publish tool
+- the publish tool stages, commits, pushes, and creates the PR using the existing GitHub App integration
 
-Responsibility:
+Why:
 
-- determine which GitHub repository the issue should run against
+- GitHub credentials stay outside the agent trust boundary
+- you reuse `lib/github/actions.ts`
+- publication becomes auditable and approval-gated
 
-Resolution order:
+## 5. Existing sync pipeline stays in place
+
+After PR creation:
+
+- existing GitHub webhooks continue to sync PRs, comments, and review state
+- existing issue-to-PR linking logic continues to operate
+
+This avoids rebuilding logic you already have and trust.
+
+## Repository Resolution Strategy
+
+Use the same resolution order every time a session starts:
 
 1. `issue.githubRepoFullName`
 2. the single repo in `project.githubRepoFullNames`
-3. if multiple project repos exist, prompt the user to choose
-4. if no repo is linked, block session launch and instruct the user to connect a repo first
+3. if multiple project repos exist, require a user choice
+4. if no repo can be resolved, block session start and show a clear action message
 
-Implementation note:
+Why this order:
 
-- keep the current resolution semantics from `lib/codex/handoff.ts`
-- move them into a Claude-oriented shared helper instead of keeping them Codex-specific
+- it matches the data model you already have
+- it keeps issue-linked repos authoritative
+- it prevents the agent from guessing the wrong repository
 
-### 3. Workspace manager
+## Data Model Plan
 
-Responsibility:
+## Reuse existing tables
 
-- create and maintain an isolated working copy of the target repository for a Claude session
-- hydrate it using the existing GitHub App installation
-- create or reuse a session branch
-- manage deterministic on-disk paths so Claude session resume works correctly
+Keep using:
 
-Recommended approach:
+- `aiSettings` for encrypted Anthropic keys
+- `issues`, `projects`, `pullRequests`, `branches`, and `issuesPullRequests` for canonical product state
 
-- create one sandboxed Docker container per issue session in v1
-- clone or fetch the repo using a short-lived GitHub App installation token
-- checkout a branch like `eganow/<issue-identifier>-<session-id>`
-- set the Claude SDK `cwd` to that repo directory
-- use a deterministic in-container repo path, for example `/workspace/repo`
-- mount two persistent volumes per session:
-  - repo workspace volume
-  - Claude home/session volume
+## Add dedicated issue-agent tables
 
-Session persistence detail:
+I recommend new generic tables rather than Claude-branded tables, so you avoid a future migration if you add another agent provider later.
 
-- Anthropic's session docs say resume depends on the same `cwd`
-- Anthropic's session files are stored under `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
-- therefore, every container that resumes a session must restore:
-  - the same effective `cwd`
-  - the corresponding persisted `~/.claude` session files
+### `issueAgentSessions`
 
-Why ephemeral over persistent local worktrees:
+Purpose:
 
-- easier security boundary
-- easier cleanup
-- aligns with Anthropic's hosting guidance
-- avoids leaking one user's workspace state into another user's run
+- one row per active or completed issue coding session
 
-Why Docker for v1:
-
-- lowest implementation friction with the current stack
-- good enough isolation for an initial internal or low-scale rollout
-- can later be hardened with gVisor or moved to Firecracker if the threat model demands it
-
-### 4. Claude Agent runtime
-
-Responsibility:
-
-- run the Claude Agent SDK
-- stream messages back to the app
-- execute coding work in the session workspace
-- request user approvals when needed
-
-Recommended SDK posture for v1:
-
-- support explicit session resumption keyed by `claudeSessionId`
-- start with `permissionMode: "acceptEdits"` for fast code iteration inside the isolated repo workspace
-- pre-approve the minimum useful built-ins for coding work
-- use `canUseTool` and hooks for higher-risk actions
-- pin the SDK version during implementation and confirm the exact tool-config surface exposed by that version
-
-Tool configuration note:
-
-- Anthropic's current TypeScript reference clearly documents top-level `allowedTools` and `disallowedTools`
-- there are also `tools` fields in other SDK contexts, such as `AgentDefinition` for subagents
-- before implementation, the team should pin the SDK version and confirm whether a top-level exact-tool-set option is available in that version
-- until then, this plan should not assume an undocumented replacement for `allowedTools`
-
-Why `acceptEdits` is the right default here:
-
-- file edits inside an isolated repo sandbox should be frictionless
-- higher-risk actions should still require approval
-- this keeps the coding experience interactive without making PR publication automatic
-
-### 5. Approval and governance layer
-
-Responsibility:
-
-- surface approvals in the chat UI when Claude wants to do something sensitive
-- return the user's decision back to the SDK
-
-Use Anthropic SDK features directly, but keep the flows separate:
-
-- tool permission flow:
-  - `canUseTool`
-  - permission modes
-  - hooks
-- clarifying-question flow:
-  - `AskUserQuestion`
-
-These are related but not the same mechanism.
-
-Implementation note:
-
-- `canUseTool` decides whether a tool invocation can proceed
-- `AskUserQuestion` is its own tool that Claude can invoke when it needs human clarification
-- the UI should show these as different event types so users understand whether they are:
-  - approving an action
-  - answering a question
-
-Actions that should require explicit user approval in v1:
-
-- publishing a branch to GitHub
-- opening a pull request
-- destructive bash commands
-- commands that leave the repo workspace
-- any unsandboxed command request
-
-### 6. GitHub publish layer
-
-Responsibility:
-
-- take the local workspace changes and publish them through the existing GitHub App path
-
-Important design choice:
-
-- do not give the Claude runtime long-lived GitHub secrets
-- do not rely on raw `git push` from inside the agent sandbox as the primary publish path
-
-Recommended v1 design:
-
-- let Claude edit files and make local commits in the sandbox
-- expose one app-owned custom tool like `publish_pull_request`
-- that tool runs outside the direct Claude trust boundary, using the existing GitHub App installation context to:
-  - push the branch
-  - create the pull request using `lib/github/actions.ts`
-  - return PR metadata to the agent and UI
-
-This keeps GitHub credentials under app control and reuses the existing GitHub integration cleanly.
-
-### 7. Sync-back layer
-
-Responsibility:
-
-- let the existing GitHub webhook system sync the newly created PR back into Convex
-- let the issue automatically reflect the PR link
-
-Implementation note:
-
-- generate PR bodies that include existing issue-link syntax
-- if there is a same-repo GitHub issue, include `Closes #<number>`
-- always include the app-native issue identifier too, for example `Closes BAC-102`
-
-This fits the existing `parseAndLinkIssues()` behavior in `convex/pullRequests.ts`.
-
-## Recommended Data Model Changes
-
-Keep Convex as the control plane for Claude sessions.
-
-### Reuse
-
-Reuse `aiSettings.encryptedAnthropicKey` rather than inventing new encrypted-key plumbing.
-
-Suggested changes:
-
-- remove or de-emphasize provider-selection UX that exists for Groq vs Anthropic
-- add Claude-specific connection metadata:
-  - `claudeConnectionStatus`
-  - `claudeValidatedAt`
-  - `defaultClaudeModel`
-
-### Add new tables
-
-Suggested new tables:
-
-#### `claudeAgentSessions`
-
-Fields:
+Suggested fields:
 
 - `organizationId`
 - `issueId`
 - `memberId`
+- `provider` with initial value `anthropic`
+- `sdk` with initial value `claude-agent-sdk`
 - `githubInstallationId`
 - `repoFullName`
+- `baseBranch`
 - `branchName`
-- `workspaceId`
+- `workspaceKey`
 - `claudeSessionId`
-- `status` (`starting`, `active`, `waiting_for_approval`, `publishing`, `completed`, `failed`, `closed`)
+- `status`
 - `lastActivityAt`
+- `latestUserMessageAt`
+- `latestAssistantMessageAt`
 - `createdAt`
 - `updatedAt`
+- `closedAt`
+- `lastError`
+- `linkedPullRequestId`
+- `githubPrNumber`
+- `githubPrUrl`
+- `usageSummary`
+
+Suggested statuses:
+
+- `starting`
+- `active`
+- `waiting_for_user`
+- `waiting_for_approval`
+- `publishing`
+- `completed`
+- `failed`
+- `closed`
+
+### `issueAgentMessages`
 
 Purpose:
 
-- tie the issue, user, repo, sandbox, and Claude conversation together
-- store the authoritative session identifier used for `resume`
+- reactive transcript storage
 
-#### `claudeAgentMessages`
-
-Fields:
+Suggested fields:
 
 - `sessionId`
-- `role` (`user`, `assistant`, `system`, `tool`, `approval`)
+- `issueId`
+- `organizationId`
+- `role`
+- `messageType`
 - `content`
 - `metadata`
 - `createdAt`
 
+Suggested roles:
+
+- `user`
+- `assistant`
+- `system`
+- `tool`
+
+Suggested message types:
+
+- `chat`
+- `tool_call`
+- `tool_result`
+- `status`
+- `approval_request`
+- `approval_result`
+- `question`
+- `publish_event`
+- `error`
+
+### `issueAgentApprovals`
+
 Purpose:
 
-- power the chat transcript UI reactively from Convex
+- persist sensitive action requests and outcomes
 
-#### `claudeAgentApprovals`
-
-Fields:
+Suggested fields:
 
 - `sessionId`
 - `toolName`
-- `requestPayload`
-- `state` (`pending`, `approved`, `denied`, `expired`)
+- `toolInput`
+- `reason`
+- `status`
 - `decision`
 - `createdAt`
 - `resolvedAt`
+- `resolvedBy`
+
+Suggested statuses:
+
+- `pending`
+- `approved`
+- `denied`
+- `expired`
+
+### `issueAgentWorkspaces`
 
 Purpose:
 
-- store pending tool approvals so the UI can show them and the worker can resume correctly
+- track workspace lifecycle independently from the conversation
 
-#### `claudeAgentWorkspaces`
-
-Fields:
+Suggested fields:
 
 - `sessionId`
-- `provider` (`docker`, `sandbox-runtime`, etc.)
-- `workspacePath`
-- `sandboxId`
+- `provider` with initial value `filesystem_git_worktree`
+- `workspaceKey`
 - `repoFullName`
+- `baseBranch`
 - `branchName`
+- `worktreePath`
+- `claudeSessionPath`
+- `worktreeCreated`
+- `isTopLevelSession`
 - `status`
-- `claudeHomePath`
-- `sessionStorageKey`
 - `createdAt`
+- `updatedAt`
 - `expiresAt`
+- `lastHealthyAt`
 
-Purpose:
+Suggested statuses:
 
-- track sandbox lifecycle and cleanup
-- track where repo state and Claude session files are persisted separately
+- `provisioning`
+- `ready`
+- `busy`
+- `failed`
+- `expired`
+- `cleaned_up`
 
-## Frontend Changes
+## Backend Modules To Add
 
-## Settings page
+Recommended new server modules:
 
-Update `app/dashboard/settings/page.tsx`:
-
-- remove the Codex setup card entirely
-- rename the Anthropic card into `Connect to Claude`
-- show:
-  - connected/disconnected state
-  - last validation time
-  - model default
-  - reconnect/disconnect actions
-
-Suggested UX:
-
-- primary CTA: `Connect to Claude`
-- helper text: "Use your Anthropic API key to power Claude Agent inside your connected repositories."
-- validation should happen on save, not only on first agent run
-
-## Issue detail page
-
-Update `app/dashboard/issues/[issueId]/page.tsx`:
-
-- rename the toggle/button from `Codex Agent` to `Claude Agent`
-- keep the same split-layout entry point if desired
-- replace the current handoff view with a real chat workspace
-
-## Claude Agent tab UI
-
-Replace `components/issue-ai-chat-tab.tsx` with a real session UI:
-
-- top panel:
-  - issue title and identifier
-  - resolved repo
-  - branch name
-  - agent status
-- transcript:
-  - user and assistant messages
-  - tool activity
-  - approval prompts
-  - publish events
-- composer:
-  - text input
-  - send
-  - stop
-  - clear session
-- side rail:
-  - repo details
-  - linked GitHub issue
-  - open branch
-  - open PR if one exists
-
-Suggested reuse:
-
-- some interaction patterns in `components/pull-review-chat.tsx` can be reused for transcript rendering and composer behavior
-
-## Backend/API Changes
-
-## New server-side Claude module
-
-Add a new server module area, for example:
-
-- `lib/claude-agent/runner.ts`
-- `lib/claude-agent/workspace.ts`
-- `lib/claude-agent/tools.ts`
-- `lib/claude-agent/publish.ts`
-- `lib/claude-agent/policies.ts`
+- `lib/issue-agent/session.ts`
+- `lib/issue-agent/repo-resolution.ts`
+- `lib/issue-agent/workspace.ts`
+- `lib/issue-agent/runner.ts`
+- `lib/issue-agent/tools.ts`
+- `lib/issue-agent/publish.ts`
+- `lib/issue-agent/policy.ts`
+- `convex/issueAgents.ts`
+- `convex/issueAgentActions.ts`
 
 Responsibilities:
 
-- bootstrap the SDK
-- map issue/repo context into prompts
-- enforce tool policy
-- persist transcript events to Convex
-- publish branches and PRs using app-owned GitHub logic
+- `repo-resolution.ts`
+  resolves the repo for an issue
+- `workspace.ts`
+  provisions and resumes workspaces
+- `runner.ts`
+  starts and resumes Claude SDK sessions
+- `tools.ts`
+  defines app-owned custom tools
+- `publish.ts`
+  stages, commits, pushes, and opens PRs through the GitHub App
+- `policy.ts`
+  centralizes allowed tools, hook rules, and approval gates
+- `convex/issueAgents.ts`
+  contains queries/mutations for UI state
+- `convex/issueAgentActions.ts`
+  contains Node actions that coordinate worker jobs if you keep execution inside Convex-triggered actions
 
-## New app APIs or worker boundary
+## SDK Integration Strategy
 
-Recommended:
+## Package and versioning
 
-- expose authenticated app endpoints for:
-  - create session
-  - send message
-  - respond to approval
-  - close session
-- run actual Claude execution in a dedicated worker process/service
+Use:
 
-Required persistence behavior:
+- `@anthropic-ai/claude-agent-sdk`
 
-- when a turn completes, persist:
-  - `claudeSessionId`
-  - transcript messages
-  - repo branch/workspace metadata
-  - location of the persisted Claude home/session files
-- when a worker restarts, rebuild the container with:
-  - the same repo volume
-  - the same Claude home volume
-  - the same `cwd`
-  - then resume the session by ID
+Do not build against the old unofficial package name from older blog posts.
 
-Avoid:
+Before implementation starts:
 
-- running long-lived SDK sessions directly in client code
-- depending on short-lived serverless request lifetimes for the full agent loop
+- pin an explicit SDK version
+- validate the exact TypeScript APIs for sessions, permissions, hooks, and custom tools against that pinned version
 
-## Custom tools to add in v1
+## Session model
 
-Prefer custom tools over MCP for app-specific actions.
+The issue chat requires resumable sessions.
 
-Suggested v1 tools:
+Design requirement:
 
-- `eganow_get_issue_context`
-  - returns issue metadata, linked issue URL, project name, existing repo mapping
-- `eganow_get_delivery_context`
-  - returns linked PRs, recent comments, or other app-native context if useful
-- `eganow_publish_pull_request`
-  - pushes the branch and opens a PR using the GitHub App
+- every session must persist the Anthropic session identifier returned by the SDK
+- every resumed turn must restore the same worktree path and the same Claude session transcript path
+
+Do not assume:
+
+- resuming the SDK session restores the filesystem
+
+The worker must restore both:
+
+- the Claude session context
+- the git worktree state
+
+## Initial tool posture
+
+Recommended v1 built-in tools:
+
+- `Read`
+- `Write`
+- `Edit`
+- `Glob`
+- `Grep`
+- `Bash`
+
+Recommended v1 exclusions by default:
+
+- `WebSearch`
+- `WebFetch`
+
+Reason:
+
+- issue resolution against a codebase should start as a repo-local workflow
+- open-web access increases security and cost surface area
+
+## Permissions and approvals
+
+Use the SDK's documented controls:
+
+- `allowedTools`
+- `permissionMode`
+- `canUseTool`
+- hooks
+
+Recommended v1 default:
+
+- allow repo-local reading and editing without extra prompts
+- gate sensitive or irreversible actions
+
+Require explicit approval for:
+
+- publish actions
+- commands that leave the worktree root
+- networked shell commands
+- destructive shell commands
+- branch deletion or reset operations
+
+## Custom Tools Plan
+
+Use app-owned custom tools for product-specific operations.
+
+Recommended v1 tools:
+
+### `eganow_get_issue_context`
+
+Returns:
+
+- issue title and body
+- issue identifier
+- linked GitHub issue metadata
+- project and team metadata
+- resolved repo
+- current branch if a session already exists
+
+### `eganow_get_repo_context`
+
+Returns:
+
+- repo default branch
+- related linked PRs
+- recent branch or PR metadata already known to the app
+
+### `eganow_publish_pull_request`
+
+Input:
+
+- commit message
+- PR title
+- PR body
+- base branch
+- optional draft flag
+
+Behavior:
+
+- validates workspace state
+- stages and commits local changes if needed
+- pushes the issue branch using GitHub App credentials
+- creates the PR using existing GitHub helpers
+- returns PR metadata
+
+### Optional v1.1 tools
+
 - `eganow_list_accessible_repos`
-  - optional, only if repo choice must be resolved interactively
+- `eganow_get_existing_pull_request_for_issue`
+- `eganow_request_repo_choice`
 
-Why custom tools instead of MCP first:
+## Prompt And Workflow Design
 
-- the app already has direct server-side GitHub utilities
-- v1 does not need the extra moving parts of a separate MCP deployment
-- Anthropic's MCP support is useful, but not required for this repo's current needs
+The system prompt for the issue agent should instruct Claude to:
 
-MCP can be added later if we want Claude to talk to broader internal systems.
+- work only inside the resolved repository and workspace
+- use the issue as the primary task definition
+- inspect the current codebase before proposing changes
+- keep a running plan internally
+- run verification commands when safe
+- ask for approval before publication
+- create a PR body that links back to the issue using syntax your existing parser already supports
 
-## End-To-End Flow
+PR body requirements:
 
-### 1. User connects Claude
+- include the app-native issue identifier, for example `Closes BAC-102`
+- include `Closes #123` when the issue is linked to a same-repo GitHub issue number
+
+Why:
+
+- your existing `parseAndLinkIssues()` logic already supports both patterns
+
+## End-To-End Runtime Flow
+
+## 1. User setup
 
 1. User opens Settings.
-2. User pastes an Anthropic API key.
-3. Server encrypts and stores it.
-4. Server validates it with a lightweight SDK or API check.
-5. UI shows `Connected`.
+2. User enters an Anthropic API key.
+3. The app encrypts and stores it in `aiSettings`.
+4. The app validates the key on save.
+5. The existing settings card shows connected status.
 
-### 2. User opens an issue and starts Claude Agent
+## 2. Session start
 
 1. User opens an issue.
-2. App resolves the target repo from the issue/project mapping.
-3. If ambiguous, app asks the user to pick a repo before session creation.
-4. App creates a `claudeAgentSession`.
-5. Worker provisions an isolated workspace for that repo and branch.
-6. Worker starts Claude Agent SDK with:
-   - issue prompt
-   - repo `cwd`
-   - safe tool policy
-   - session bookkeeping hooks
-   - persisted Claude home/session storage
+2. User enters a request in the existing chatbot tab.
+3. The app resolves the target repo.
+4. If repo resolution is ambiguous, the session pauses for user selection.
+5. The app creates an `issueAgentSession`.
+6. The workspace manager provisions or resumes the git worktree at the persisted session path.
+7. The worker starts or resumes the Claude session.
 
-### 3. Claude works inside the repo
+## 3. Agent execution
 
-1. Claude reads files and analyzes the repo.
-2. Claude edits files and creates new ones.
-3. Claude runs repo-local commands as allowed.
-4. Transcript and status stream back into Convex and the issue UI.
+1. Claude reads files and inspects the codebase.
+2. Claude edits files and runs repo-local commands.
+3. The worker streams messages and tool activity into Convex.
+4. The issue page reacts to new transcript items through queries.
 
-### 4. Sensitive action approval
+## 4. Approval and clarification
 
-1. Claude requests a sensitive action.
-2. The SDK triggers `canUseTool`.
-3. Worker records a pending approval.
-4. UI shows the approval request.
-5. User approves or denies.
-6. Worker returns that decision to the SDK and execution continues.
+1. Claude requests a sensitive action or asks a clarifying question.
+2. The worker records a pending approval or question in Convex.
+3. The issue chat shows the existing conversation plus the pending decision card.
+4. The user responds.
+5. The worker resumes the SDK turn with that decision.
 
-### 4b. Clarifying questions
+## 5. Publish
 
-1. Claude invokes `AskUserQuestion`.
-2. Worker records the question payload.
-3. UI renders a question card distinct from approval cards.
-4. User answers.
-5. Worker returns the answer payload to the SDK and execution continues.
-
-### 5. PR publication
-
-1. Claude decides the work is ready.
+1. Claude decides the change is ready.
 2. Claude calls `eganow_publish_pull_request`.
-3. App-owned publish logic pushes the branch and opens the PR via GitHub App credentials.
-4. PR body includes issue-link text.
-5. Existing GitHub webhooks sync the PR back into Convex.
-6. The issue page now shows the linked PR through the existing pipeline.
+3. The app-controlled publish layer commits, pushes, and opens the PR.
+4. The session stores PR metadata immediately.
+5. Existing GitHub webhooks sync the PR back into the rest of the app.
 
-## Security Model
+## 6. Post-publish
 
-Follow Anthropic's deployment guidance closely.
+1. The issue page shows the linked PR through existing issue-to-PR data.
+2. The session stays open for follow-up prompts if desired.
+3. The workspace remains resumable until expiry or explicit close.
 
-### Required security boundaries
+## Security And Operations Plan
 
-- run the Claude Agent SDK in a sandboxed container
-- keep GitHub App private credentials outside the agent sandbox
-- pass only short-lived installation-scoped access into workspace bootstrap/publish operations
-- store Anthropic API keys encrypted at rest
-- restrict filesystem access to the session workspace
-- restrict network egress aggressively
+## Required guardrails
 
-### Network posture
+- run the worker as a dedicated Node process with access to `/workspaces/` only
+- never expose the GitHub App private key or installation token directly to the agent
+- keep Anthropic API keys encrypted at rest
+- decrypt Anthropic keys only inside server-side Node execution
+- restrict Bash execution to the worktree root through the policy layer and deny commands that traverse above the worktree path
+- block arbitrary network egress from shell commands in v1
 
-Allow by default:
+## GitHub auth handling
 
-- Anthropic API traffic
-- app-owned publish/bootstrap traffic
+Use existing `getInstallationClient()` and Octokit app auth.
 
-Deny by default:
+Why:
 
-- arbitrary internet access from agent bash commands
+- Octokit already handles installation-scoped auth correctly
+- GitHub installation tokens expire quickly
+- this avoids custom token lifecycle logic inside the agent runtime
 
-Optional allowlist, if needed later:
+## Auditability
 
-- package registries required for test/install workflows
+Persist and log:
 
-Initial runtime choice:
-
-- v1 runtime: Docker
-- hardening target if needed: Docker plus gVisor
-- future higher-isolation option: Firecracker-style microVMs
-
-### Bash/tool policy
-
-Recommended v1 policy:
-
-- allow repo-local read/edit/write and safe bash work
-- deny or require approval for:
-  - destructive commands
-  - commands outside the workspace
-  - unsandboxed execution
-  - direct network access
-  - direct PR publication
-
-### Auditability
-
-Use SDK hooks to log:
-
+- session start and stop
 - tool calls
-- edits
-- approval requests
-- publish actions
-- final session outcome
+- approval requests and decisions
+- publish operations
+- failures
+- usage and cost metadata
 
-Persist those records in Convex or structured logs.
+## Cost Tracking
 
-## Cost tracking
+Because users bring their own Anthropic keys, cost visibility is product-critical.
 
-Because each user brings their own Anthropic API key, usage accounting is product-critical.
+Track per session:
 
-Implementation requirements:
+- total input tokens
+- total output tokens
+- total cost if exposed by the SDK response
+- model name
+- turn count
+- publish count
 
-- record `total_cost_usd` from every completed `query()` result
-- record per-model usage when available
-- accumulate spend per:
-  - Claude session
-  - issue
-  - user
-- surface at least lightweight cost metadata in internal logs or admin tooling
+Store those metrics on:
 
-Suggested storage:
+- `issueAgentSessions.usageSummary`
 
-- add usage fields on `claudeAgentSessions`
-- optionally add a `claudeAgentUsageEvents` table for per-turn accounting
+Optionally add later:
 
-## Detailed Step-By-Step Implementation Plan
+- `issueAgentUsageEvents` for per-turn billing and debugging
 
-## Phase 1: Remove legacy Codex handoff surfaces
+## Frontend Implementation Plan
 
-1. Delete `lib/codex/handoff.ts`.
-2. Remove the Codex card from `app/dashboard/settings/page.tsx`.
-3. Rename the issue tab/button from `Codex Agent` to `Claude Agent`.
-4. Replace the current `IssueAiChatTab` content with a real chat shell, even if initially backed by mock data.
+## Settings page
 
-## Phase 2: Rework Claude connection in Settings
+Keep the current settings location and visual shape.
 
-1. Reuse the existing Anthropic key encryption/storage path.
-2. Add validation-on-save.
-3. Remove or de-emphasize provider toggles that are unrelated to the new Claude Agent workflow.
-4. Store connection metadata and surface it in the UI.
+Implementation work:
 
-## Phase 3: Add Convex session state
+- reuse the existing Claude/Anthropic card
+- validate the key on save
+- surface last validation time
+- surface active model or default model
+- keep disconnect behavior
 
-1. Add `claudeAgentSessions`.
-2. Add `claudeAgentMessages`.
-3. Add `claudeAgentApprovals`.
-4. Add `claudeAgentWorkspaces`.
-5. Add queries/mutations to:
-   - create a session
-   - append a user message
-   - stream/list session messages
-   - set status
-   - create/resolve approvals
-   - close sessions
+## Issue chat tab
 
-## Phase 4: Build repo resolution and workspace bootstrap
+Keep the existing tab location and general structure.
 
-1. Extract the current issue/project repo resolution logic into a reusable Claude module.
-2. Resolve `organization.githubInstallationId` from the current issue context.
-3. Use the GitHub App installation to create a Docker-backed sandbox workspace.
-4. Clone/fetch the repo and create a session branch.
-5. Persist both:
-   - repo workspace state
-   - Claude home/session files
-6. Record deterministic `cwd` and workspace metadata in Convex.
+Implementation work:
 
-## Phase 5: Build the Claude worker service
+- replace the static placeholder with real transcript rendering
+- wire the composer to a session create/send mutation
+- render tool activity inline
+- render approval cards inline
+- render branch and PR status in the existing shell
+- add stop, retry, and close-session controls without redesigning layout
 
-1. Add the TypeScript Agent SDK package.
-2. Pin the SDK version and confirm the exact tool configuration API exposed by that version.
-3. Create the worker entrypoint that starts an agent against a session workspace.
-4. Implement explicit session resume keyed by `claudeSessionId`.
-5. Persist transcript messages to Convex as they stream.
-6. Decide after a short spike whether to use:
-   - V1 `query()` with `resume`
-   - V2 preview sessions for cleaner `send()` / `stream()` ergonomics
+## Backend Implementation Phases
 
-## Phase 6: Add approvals and guardrails
+## Phase 1. Foundation and schema
 
-1. Implement `canUseTool`.
-2. Implement hooks for audit logging and safety checks.
-3. Record pending approvals in Convex.
-4. Build approval UI inside the issue chat tab.
-5. Build separate `AskUserQuestion` UI handling.
-6. Resume execution after approve/deny or question answer.
+Tasks:
 
-## Phase 7: Add custom publish tools
+- finalize table names and statuses
+- add Convex schema entries and indexes
+- add `convex/issueAgents.ts` queries and mutations
+- add basic session creation and message storage
 
-1. Add `eganow_get_issue_context`.
-2. Add `eganow_publish_pull_request`.
-3. Make publish logic generate a PR body that references the issue in the syntax the current parser already understands.
-4. Reuse `lib/github/actions.ts` for PR creation.
-5. Let existing GitHub webhooks sync the PR back into Convex.
+Exit criteria:
 
-## Phase 8: Polish the issue chat UI
+- the UI can create a session row and show stored transcript items
 
-1. Show repo, branch, session state, and PR state in the tab.
-2. Show tool activity inline.
-3. Show pending approvals as action cards.
-4. Add stop/retry/close-session controls.
-5. Add open-branch and open-PR shortcuts once available.
+## Phase 2. Repo resolution and workspace bootstrap
 
-## Phase 9: Reliability and cleanup
+Tasks:
 
-1. Add idle-session expiration.
-2. Add workspace cleanup jobs.
-3. Add retry handling for worker crashes.
-4. Add session-file recovery for worker/container restarts.
-5. Add transcript recovery from Convex on refresh.
-6. Add observability around session duration, publish rate, failure modes, and per-session spend.
+- extract repo resolution into a shared helper
+- provision a git worktree from the GitHub App-backed base clone
+- create or restore an issue branch
+- persist workspace metadata
 
-## Phase 10: Tests and rollout
+Exit criteria:
 
-1. Unit test repo resolution rules.
-2. Unit test issue-to-PR body generation.
-3. Integration test session creation and message persistence.
-4. Integration test approval flows.
-5. Integration test publish flow against a test repo.
-6. Verify webhook-driven PR sync still links back to issues correctly.
-7. Roll out behind a feature flag.
+- the backend can run `git worktree add` for a resolved issue repo, create the issue branch inside that worktree, persist the worktree path and branch name to `issueAgentWorkspaces`, and restore the same worktree path deterministically on worker restart
 
-## Recommended File-Level Implementation Map
+## Phase 3. Claude worker integration
 
-### Replace
+Tasks:
 
-- `app/dashboard/settings/page.tsx`
+- install and pin `@anthropic-ai/claude-agent-sdk`
+- implement worker session start and resume
+- stream SDK events into Convex
+- persist the returned Claude session identifier
+
+Exit criteria:
+
+- a user prompt in the issue tab produces real Claude responses and tool activity
+
+## Phase 4. Approvals and policy
+
+Tasks:
+
+- implement `canUseTool`
+- add hook-based audit logging
+- store approval requests in Convex
+- add UI actions for approve and deny
+
+Exit criteria:
+
+- gated actions pause cleanly and resume after user input
+
+## Phase 5. Publish flow
+
+Tasks:
+
+- implement `eganow_publish_pull_request`
+- stage, commit, push, and create PR through the GitHub App path
+- generate a PR body with issue-link syntax
+- store returned PR metadata on the session
+
+Exit criteria:
+
+- Claude can publish a PR from an issue session without direct GitHub credentials
+
+## Phase 6. Reliability and cleanup
+
+Tasks:
+
+- add idle session expiry
+- add workspace cleanup jobs
+- add crash recovery for worker restarts
+- make session resume deterministic
+
+Exit criteria:
+
+- a worker restart does not permanently orphan a viable session
+
+## Phase 7. Testing and rollout
+
+Tasks:
+
+- unit test repo resolution
+- unit test PR body generation
+- integration test session start, resume, approval, and publish flows
+- integration test GitHub webhook sync after PR creation
+- release behind a feature flag
+
+Exit criteria:
+
+- end-to-end issue-to-PR flow works reliably in a test repository
+
+## Recommended File-Level Ownership
+
+### Files to update
+
 - `app/dashboard/issues/[issueId]/page.tsx`
 - `components/issue-ai-chat-tab.tsx`
+- `app/dashboard/settings/page.tsx`
+- `convex/schema.ts`
 
-### Reuse
+### Files to reuse heavily
 
 - `lib/github/app.ts`
 - `lib/github/client.ts`
 - `lib/github/actions.ts`
-- `lib/github/handlers/issues.ts`
-- `lib/github/handlers/pull-request.ts`
-- `convex/github.ts`
-- `convex/organizations.ts`
 - `convex/issues.ts`
 - `convex/pullRequests.ts`
+- `convex/aiReviews.ts`
 - `lib/ai/crypto.ts`
 
-### Add
+### New files to add
 
-- `lib/claude-agent/runner.ts`
-- `lib/claude-agent/workspace.ts`
-- `lib/claude-agent/tools.ts`
-- `lib/claude-agent/publish.ts`
-- `lib/claude-agent/policies.ts`
-- `convex/claudeAgents.ts`
-- worker/service entrypoint for sandboxed Claude execution
+- `convex/issueAgents.ts`
+- `convex/issueAgentActions.ts`
+- `lib/issue-agent/repo-resolution.ts`
+- `lib/issue-agent/workspace.ts`
+- `lib/issue-agent/runner.ts`
+- `lib/issue-agent/tools.ts`
+- `lib/issue-agent/publish.ts`
+- `lib/issue-agent/policy.ts`
 
 ## Final Recommendation
 
-Implement this as:
+Build this feature as an in-app issue agent, not as a handoff.
 
-- a real in-app Claude Agent
-- backed by the TypeScript Claude Agent SDK
-- running in isolated sandbox workspaces
-- using the existing GitHub App integration for repo access and PR publication
-- using Convex as the chat/session/control plane
+The best-fit architecture for this codebase is:
 
-Do not implement this as:
+- existing UI shell stays in place
+- existing Settings key flow stays in place
+- existing GitHub App integration remains authoritative
+- Convex becomes the session and transcript control plane
+- a dedicated Claude Agent SDK Node worker becomes the execution engine
+- one top-level git worktree per issue session becomes the filesystem isolation boundary
+- PR publication remains app-controlled and approval-gated
 
-- another handoff prompt generator
-- a browser-only Claude client
-- a second GitHub auth path
-- a direct replacement for the current webhook sync model
+That gives you a coherent flow:
 
-That gives the app a cohesive end-to-end flow:
+- user connects their own Anthropic key
+- user opens an issue and chats in the existing tab
+- Claude works against the correct repo through the connected GitHub App
+- the app safely publishes a PR
+- existing webhook sync brings the result back into the rest of the product
 
-- Settings connects Claude
-- Issue opens Claude Agent
-- Claude works inside the correct repo
-- user approves higher-risk actions
-- PR creation flows through the GitHub App already present in the codebase
-- the existing webhook sync brings the result back into the issue automatically
+## Sources
+
+- [Anthropic Agent SDK sessions](https://code.claude.com/docs/en/agent-sdk/sessions)
+- [Claude Code common workflows — worktrees](https://code.claude.com/docs/en/common-workflows)
+- [GitHub App installation access token documentation](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app)
+- [GitHub pull request creation documentation](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request)

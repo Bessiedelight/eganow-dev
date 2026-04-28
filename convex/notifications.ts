@@ -62,6 +62,9 @@ export const listForCurrentUser = query({
 
     // Apply filters
     notifications = notifications.filter((n) => {
+      // Only show notifications created after the user joined
+      if (n.createdAt < member.joinedAt) return false;
+
       // Always exclude archived
       if (n.isArchived) return false;
       // Exclude snoozed notifications that haven't expired
@@ -230,6 +233,7 @@ export const getUnreadCount = query({
 
     let count = 0;
     for (const notification of unread) {
+      if (notification.createdAt < member.joinedAt) continue;
       if (notification.isArchived) continue;
       if (
         notification.isSnoozed &&
@@ -278,7 +282,9 @@ export const markAllAsRead = mutation({
       .collect();
 
     await Promise.all(
-      unread.map((n) => ctx.db.patch(n._id, { isRead: true }))
+      unread
+        .filter((n) => n.createdAt >= member.joinedAt)
+        .map((n) => ctx.db.patch(n._id, { isRead: true }))
     );
   },
 });

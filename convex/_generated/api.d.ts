@@ -18,6 +18,7 @@ import type * as commits from "../commits.js";
 import type * as debugOrg from "../debugOrg.js";
 import type * as github from "../github.js";
 import type * as http from "../http.js";
+import type * as issueAgents from "../issueAgents.js";
 import type * as issues from "../issues.js";
 import type * as labels from "../labels.js";
 import type * as members from "../members.js";
@@ -48,6 +49,7 @@ declare const fullApi: ApiFromModules<{
   debugOrg: typeof debugOrg;
   github: typeof github;
   http: typeof http;
+  issueAgents: typeof issueAgents;
   issues: typeof issues;
   labels: typeof labels;
   members: typeof members;

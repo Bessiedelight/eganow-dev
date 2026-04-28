@@ -1,4 +1,4 @@
-import { getGitHubApp } from "./app";
+import { getGitHubApp } from "./app.ts";
 
 /**
  * Returns an authenticated Octokit client scoped to a specific

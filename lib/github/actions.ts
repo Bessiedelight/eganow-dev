@@ -1,6 +1,6 @@
 "use server";
 
-import { getInstallationClient } from "./client";
+import { getInstallationClient } from "./client.ts";
 
 /**
  * Create an issue on GitHub via the GitHub App installation.
@@ -94,6 +94,76 @@ export async function updateGitHubIssue(
   );
 
   return { number: data.number, state: data.state };
+}
+
+export async function submitGitHubPullRequestReview(
+  installationId: number,
+  repoFullName: string,
+  prNumber: number,
+  event: "APPROVE" | "COMMENT" | "REQUEST_CHANGES",
+  body?: string
+) {
+  const [owner, repo] = repoFullName.split("/");
+  const octokit = await getInstallationClient(installationId);
+
+  try {
+    const { data } = await octokit.request(
+      "POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews",
+      {
+        owner,
+        repo,
+        pull_number: prNumber,
+        event,
+        body: body || undefined,
+      }
+    );
+
+    return {
+      id: data.id,
+      state: data.state,
+      htmlUrl: data.html_url,
+    };
+  } catch (error) {
+    throw new Error(
+      error instanceof Error ? error.message : "Failed to submit review on GitHub"
+    );
+  }
+}
+
+export async function mergeGitHubPullRequest(
+  installationId: number,
+  repoFullName: string,
+  prNumber: number,
+  mergeMethod: "merge" | "squash" | "rebase" = "merge"
+) {
+  const [owner, repo] = repoFullName.split("/");
+  const octokit = await getInstallationClient(installationId);
+
+  try {
+    const { data } = await octokit.request(
+      "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge",
+      {
+        owner,
+        repo,
+        pull_number: prNumber,
+        merge_method: mergeMethod,
+      }
+    );
+
+    if (!data.merged) {
+      throw new Error(data.message || "GitHub did not merge the pull request");
+    }
+
+    return {
+      merged: data.merged,
+      message: data.message,
+      sha: data.sha,
+    };
+  } catch (error) {
+    throw new Error(
+      error instanceof Error ? error.message : "Failed to merge pull request on GitHub"
+    );
+  }
 }
 
 /**
@@ -221,6 +291,9 @@ export async function fetchPullRequestDetail(
     additions: pr.additions,
     deletions: pr.deletions,
     changedFiles: pr.changed_files,
+    mergeable: typeof pr.mergeable === "boolean" ? pr.mergeable : undefined,
+    mergeableState:
+      typeof pr.mergeable_state === "string" ? pr.mergeable_state : undefined,
     mergedBy: pr.merged_by?.login,
     mergedAt: pr.merged_at
       ? new Date(pr.merged_at).getTime()
@@ -245,10 +318,18 @@ export async function fetchRepoCommits(
   const [owner, repo] = repoFullName.split("/");
   const octokit = await getInstallationClient(installationId);
 
-  const { data: commits } = await octokit.request(
-    "GET /repos/{owner}/{repo}/commits",
-    { owner, repo, per_page: perPage }
-  );
+  let commits;
+  try {
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/commits",
+      { owner, repo, per_page: perPage }
+    );
+    commits = data;
+  } catch (err: any) {
+    // 409 = "Git Repository is empty" — no commits exist yet
+    if (err?.status === 409) return [];
+    throw err;
+  }
 
   return commits.map((c: any) => ({
     sha: c.sha,
@@ -411,7 +492,8 @@ export async function createGitHubPullRequest(
   title: string,
   body: string | undefined,
   headBranch: string,
-  baseBranch: string
+  baseBranch: string,
+  draft?: boolean
 ) {
   const [owner, repo] = repoFullName.split("/");
   const octokit = await getInstallationClient(installationId);
@@ -423,13 +505,21 @@ export async function createGitHubPullRequest(
     body,
     head: headBranch,
     base: baseBranch,
+    draft: draft || false,
   });
 
   return {
     githubPrNumber: data.number,
+    number: data.number,
     githubRepoFullName: repoFullName,
     githubPrId: data.id,
     githubUrl: data.html_url,
+    title: data.title,
+    state: data.state,
+    isDraft: data.draft || false,
+    headBranch: data.head?.ref || headBranch,
+    baseBranch: data.base?.ref || baseBranch,
+    authorGithubUsername: data.user?.login || "unknown",
   };
 }
 
@@ -590,4 +680,67 @@ export async function fetchPRFiles(
     deletions: f.deletions,
     patch: (f.patch || "").substring(0, 6000),
   }));
+}
+
+/**
+ * Compare a head branch to a base branch.
+ * Returns ahead/behind counts and recent commits.
+ */
+export async function fetchBranchComparison(
+  installationId: number,
+  repoFullName: string,
+  baseBranch: string,
+  headBranch: string
+) {
+  const [owner, repo] = repoFullName.split("/");
+  const octokit = await getInstallationClient(installationId);
+
+  try {
+    const { data } = await octokit.request(
+      "GET /repos/{owner}/{repo}/compare/{basehead}",
+      { owner, repo, basehead: `${baseBranch}...${headBranch}` }
+    );
+
+    return {
+      aheadBy: data.ahead_by,
+      behindBy: data.behind_by,
+      totalCommits: data.total_commits,
+      status: data.status as string,
+      files: (data.files || []).slice(0, 30).map((f: any) => ({
+        filename: f.filename,
+        status: f.status,
+        additions: f.additions,
+        deletions: f.deletions,
+      })),
+      commits: (data.commits || []).slice(0, 20).map((c: any) => ({
+        sha: c.sha,
+        message: c.commit?.message || "",
+        authorGithubUsername: c.author?.login || c.commit?.author?.name || "unknown",
+        committedAt: c.commit?.committer?.date
+          ? new Date(c.commit.committer.date).getTime()
+          : Date.now(),
+      })),
+      diff: (data.diff_url || "") as string,
+    };
+  } catch (err: any) {
+    if (err?.status === 404) return null;
+    throw err;
+  }
+}
+
+/**
+ * Delete a branch on GitHub.
+ */
+export async function deleteGitHubBranch(
+  installationId: number,
+  repoFullName: string,
+  branchName: string
+) {
+  const [owner, repo] = repoFullName.split("/");
+  const octokit = await getInstallationClient(installationId);
+
+  await octokit.request(
+    "DELETE /repos/{owner}/{repo}/git/refs/{ref}",
+    { owner, repo, ref: `heads/${branchName}` }
+  );
 }

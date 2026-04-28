@@ -20,7 +20,7 @@ import {
 import {
   Inbox, AlertCircle, Users, FolderKanban, CalendarClock, Settings2, GitPullRequest,
   Code2, Layers, Headset, HardDrive, Palette, Car, Globe, Shield, Zap, Bug, Rocket,
-  Database, Cpu, Wifi, Smartphone, Monitor, Lock, Settings, Star, Heart, Sun, Moon
+  Database, Cpu, Wifi, Smartphone, Monitor, Lock, Settings, Star, Heart, Sun, Moon, Bot,
 } from "lucide-react"
 import { useTheme } from "next-themes"
 
@@ -97,6 +97,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
       {
         label: "Organization",
         items: [
+          
           {
             title: "Teams",
             url: "/dashboard/teams",
@@ -112,13 +113,14 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
           },
         ]
       },
+
       {
-        label: "Workspace",
+        label: "Personalization",
         items: [
           {
-            title: "Co-work",
-            url: "#",
-            icon: <CalendarClock />,
+            title: "Members",
+            url: "/dashboard/members",
+            icon: <Shield />,
             isActive: false,
           },
           {
@@ -127,6 +129,7 @@ export function AppSidebar({ ...props }: React.ComponentProps<typeof Sidebar>) {
             icon: <Settings2 />,
             isActive: false,
           },
+          
         ]
       }
     ]
