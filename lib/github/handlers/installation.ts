@@ -1,7 +1,7 @@
 import type { EmitterWebhookEvent } from "@octokit/webhooks";
-import { getConvexClient } from "@/lib/convex-server";
+import { getConvexAdminClient } from "@/lib/convex-server";
 import { getInstallationClient } from "@/lib/github/client";
-import { api } from "@/convex/_generated/api";
+import { internal } from "@/convex/_generated/api";
 
 async function fetchOrganizationMemberUsernames(
   installationId: number,
@@ -61,10 +61,10 @@ export async function handleInstallationCreated(
       `(ID: ${installation.id}) by ${sender.login}`
   );
 
-  const convex = getConvexClient();
+  const convex = getConvexAdminClient();
 
   try {
-    await convex.mutation(api.github.saveInstallationFromWebhook, {
+    await convex.mutation(internal.github.saveInstallationFromWebhook, {
       installationId: installation.id,
       accountLogin,
       accountType: installation.target_type,
@@ -78,7 +78,7 @@ export async function handleInstallationCreated(
       installation.target_type
     );
 
-    await convex.mutation(api.organizations.syncInstallationRosterFromWebhook, {
+    await convex.mutation(internal.organizations.syncInstallationRosterFromWebhook, {
       installationId: installation.id,
       accountLogin,
       accountType: installation.target_type,
@@ -104,10 +104,10 @@ export async function handleInstallationDeleted(
       `(ID: ${installation.id}) by ${sender.login}`
   );
 
-  const convex = getConvexClient();
+  const convex = getConvexAdminClient();
 
   try {
-    await convex.mutation(api.github.removeInstallationFromWebhook, {
+    await convex.mutation(internal.github.removeInstallationFromWebhook, {
       installationId: installation.id,
     });
   } catch (error) {

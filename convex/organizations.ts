@@ -443,7 +443,6 @@ export const getById = query({
 export const bootstrapFromInstallation = mutation({
   args: {
     installationId: v.number(),
-    memberUsernames: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
@@ -462,11 +461,13 @@ export const bootstrapFromInstallation = mutation({
 
     const user = await ctx.db.get(userId);
 
-    if (installation.userId !== userId || installation.installedByGithubLogin !== user?.githubLogin) {
-      await ctx.db.patch(installation._id, {
-        userId,
-        installedByGithubLogin: user?.githubLogin,
-      });
+    if (
+      installation.status !== "active" ||
+      installation.userId !== userId ||
+      !user?.githubLogin ||
+      installation.installedByGithubLogin !== user.githubLogin
+    ) {
+      throw new Error("Installation is not verified for the current user");
     }
     const organization = await getOrCreateOrganizationForInstallation(
       ctx,
@@ -487,15 +488,11 @@ export const bootstrapFromInstallation = mutation({
       "owner"
     );
 
-    if (args.memberUsernames && args.memberUsernames.length > 0) {
-      await syncRosterMembers(ctx, organization._id, args.memberUsernames);
-    }
-
     return organization._id;
   },
 });
 
-export const syncInstallationRosterFromWebhook = mutation({
+export const syncInstallationRosterFromWebhook = internalMutation({
   args: {
     installationId: v.number(),
     accountLogin: v.string(),
@@ -549,7 +546,7 @@ export const syncInstallationRosterFromWebhook = mutation({
   },
 });
 
-export const addRosterMemberFromWebhook = mutation({
+export const addRosterMemberFromWebhook = internalMutation({
   args: {
     installationId: v.number(),
     githubUsername: v.string(),
@@ -570,7 +567,7 @@ export const addRosterMemberFromWebhook = mutation({
   },
 });
 
-export const removeRosterMemberFromWebhook = mutation({
+export const removeRosterMemberFromWebhook = internalMutation({
   args: {
     installationId: v.number(),
     githubUsername: v.string(),

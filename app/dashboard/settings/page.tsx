@@ -155,14 +155,10 @@ export default function SettingsPage() {
 
         await saveInstallation({
           installationId: installation.installationId,
-          accountLogin: installation.accountLogin,
-          accountType: installation.accountType,
-          accountAvatarUrl: installation.accountAvatarUrl,
         })
 
         await bootstrapFromInstallation({
           installationId: installation.installationId,
-          memberUsernames: installation.memberUsernames,
         })
 
         router.replace("/dashboard/settings")
