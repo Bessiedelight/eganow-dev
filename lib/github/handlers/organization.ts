@@ -1,6 +1,6 @@
 import type { EmitterWebhookEvent } from "@octokit/webhooks";
-import { getConvexClient } from "@/lib/convex-server";
-import { api } from "@/convex/_generated/api";
+import { getConvexAdminClient } from "@/lib/convex-server";
+import { internal } from "@/convex/_generated/api";
 
 export async function handleOrganizationMemberAdded(
   event: EmitterWebhookEvent<"organization.member_added">
@@ -15,10 +15,10 @@ export async function handleOrganizationMemberAdded(
     `[GitHub Org] Member added to "${organization.login}": ${githubUsername}`
   );
 
-  const convex = getConvexClient();
+  const convex = getConvexAdminClient();
 
   try {
-    await convex.mutation(api.organizations.addRosterMemberFromWebhook, {
+    await convex.mutation(internal.organizations.addRosterMemberFromWebhook, {
       installationId: installation.id,
       githubUsername,
     });
@@ -40,10 +40,10 @@ export async function handleOrganizationMemberRemoved(
     `[GitHub Org] Member removed from "${organization.login}": ${githubUsername}`
   );
 
-  const convex = getConvexClient();
+  const convex = getConvexAdminClient();
 
   try {
-    await convex.mutation(api.organizations.removeRosterMemberFromWebhook, {
+    await convex.mutation(internal.organizations.removeRosterMemberFromWebhook, {
       installationId: installation.id,
       githubUsername,
     });

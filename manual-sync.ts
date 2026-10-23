@@ -1,10 +1,10 @@
-import { getConvexClient } from "./lib/convex-server";
-import { api } from "./convex/_generated/api";
+import { getConvexAdminClient } from "./lib/convex-server";
+import { internal } from "./convex/_generated/api";
 
-const convex = getConvexClient();
+const convex = getConvexAdminClient();
 
 async function run() {
-  await convex.mutation(api.organizations.syncInstallationRosterFromWebhook, {
+  await convex.mutation(internal.organizations.syncInstallationRosterFromWebhook, {
     installationId: 125686138,
     accountLogin: "eganow-dev",
     accountType: "Organization",

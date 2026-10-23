@@ -1,5 +1,10 @@
 import { v } from "convex/values";
-import { mutation, query, type MutationCtx } from "./_generated/server";
+import {
+  internalMutation,
+  mutation,
+  query,
+  type MutationCtx,
+} from "./_generated/server";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import type { Doc } from "./_generated/dataModel";
 
@@ -47,29 +52,41 @@ async function upsertInstallation(
 }
 
 /**
- * Save a GitHub App installation linked to the current user.
+ * Link the current user to an installation recorded by a verified webhook.
  */
 export const saveInstallation = mutation({
   args: {
     installationId: v.number(),
-    accountLogin: v.string(),
-    accountType: v.string(),
-    accountAvatarUrl: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const userId = await getAuthUserId(ctx);
     if (!userId) throw new Error("Not authenticated");
     const user = await ctx.db.get(userId);
 
-    return await upsertInstallation(ctx, {
-      userId,
-      installedByGithubLogin: user?.githubLogin,
-      ...args,
-    });
+    const installation = await ctx.db
+      .query("githubInstallations")
+      .withIndex("by_installationId", (q) =>
+        q.eq("installationId", args.installationId)
+      )
+      .unique();
+
+    if (
+      !installation ||
+      installation.status !== "active" ||
+      !user?.githubLogin ||
+      installation.installedByGithubLogin !== user.githubLogin ||
+      (installation.userId !== undefined && installation.userId !== userId)
+    ) {
+      throw new Error("Installation is not verified for the current user");
+    }
+
+    // Account metadata and installer provenance come only from GitHub webhooks.
+    await ctx.db.patch(installation._id, { userId });
+    return installation._id;
   },
 });
 
-export const saveInstallationFromWebhook = mutation({
+export const saveInstallationFromWebhook = internalMutation({
   args: {
     installationId: v.number(),
     accountLogin: v.string(),
@@ -118,7 +135,7 @@ export const removeInstallation = mutation({
   },
 });
 
-export const removeInstallationFromWebhook = mutation({
+export const removeInstallationFromWebhook = internalMutation({
   args: {
     installationId: v.number(),
   },
